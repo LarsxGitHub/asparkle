@@ -9,4 +9,6 @@ edition = "2021"
 bgpkit-parser = "0.7.2"
 bgpkit-broker = "0.3.2"
 chrono = "0.4.24"
+clap = "4.3.0"
 log = "0.4.17"
+rpki = {version="0.15.10", features = ["repository"]}
