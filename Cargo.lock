@@ -92,8 +92,10 @@ dependencies = [
  "bgpkit-parser",
  "chrono",
  "clap 4.3.0",
+ "itertools",
  "log",
  "rpki",
+ "stats-cli",
 ]
 
 [[package]]
@@ -151,13 +153,15 @@ dependencies = [
 
 [[package]]
 name = "bgpkit-broker"
-version = "0.3.2"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556be3703d7cb7ce747728175c2ded6461652632f084206c49abdd8a8164a0cb"
+checksum = "68fdc33c56d320a0b347f898ab8a9b085ee58fa7b2928c2b04aef3eca84c19dc"
 dependencies = [
+ "chrono",
  "log",
  "reqwest",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1195,6 +1199,16 @@ name = "spin"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
+
+[[package]]
+name = "stats-cli"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8786c4fc8a91bc4fcd90aed33413f79e4dc9811f24ba14d1d59adf57cf1c871"
+dependencies = [
+ "clap 2.34.0",
+ "num-traits 0.2.15",
+]
 
 [[package]]
 name = "strsim"

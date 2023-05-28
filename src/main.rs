@@ -1,12 +1,23 @@
+use bgpkit_broker::{BgpkitBroker, BrokerItem, QueryParams};
+use bgpkit_parser::BgpkitParser;
 use chrono::{DateTime, FixedOffset, NaiveDate};
-use clap::{Arg, ArgMatches};
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
+
+use clap::{Arg, ArgMatches};
+use inc_stats::Percentiles;
+use itertools::Itertools;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
-use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
+
+// the percentiles that will be calculated in addition to min and max.
+const PERCENTILE_LIST: [f64; 7] = [0.05, 0.10, 0.25, 0.5, 0.75, 0.90, 0.95];
+
+mod aspa;
+mod utils;
 
 #[macro_export]
 /// macro that logs an error message bevor exiting.
@@ -64,59 +75,108 @@ fn get_cli_parameters() -> ArgMatches {
         .get_matches()
 }
 
-/// returns a vector of .asa file paths for an input dir.
-fn get_asa_files(dir: &str) -> Result<Vec<String>, Box<dyn Error>> {
-    // read the dir.
-    let paths = fs::read_dir(dir).expect(&format!("Unable to read directory {}", dir));
+/// Caluclates the min, percentiles within @percentile_list, and max of the set sizes within the
+/// values of the @themap map. Returns an vector with only zeros if @themap has no value sets.
+fn calc_set_site_percentiles<T, U>(
+    themap: &HashMap<T, HashSet<U>>,
+    percentile_list: &[f64],
+) -> Vec<usize> {
+    let mut percs = Percentiles::new();
+    let mut max: usize = 0;
+    let mut min: Option<usize> = None;
+    for (_, value_set) in themap.iter() {
+        let n = value_set.len();
+        // add to percentile calulcation
+        percs.add(n as f32);
 
-    // parse and filter entries and append them to files vector.
-    let mut files = Vec::new();
-    for dir_entry in paths {
-        // parse the path
-        let path = dir_entry
-            .expect(&format!("Unable to obtain path for file in {}.", dir))
-            .path();
-        let link = path.into_os_string().into_string().expect(&format!(
-            "Unable to obtain os string for some file in {}.",
-            dir
-        ));
-        // ensure it's an .asa file, then append to vector.
-        if link.ends_with(".asa") {
-            files.push(String::from(link));
+        // set the maximum
+        if max < n {
+            max = n;
+        }
+
+        // set the minimum accurately.
+        if let Some(m) = min {
+            if n < m {
+                min = Some(n);
+            }
+        } else {
+            min = Some(n);
         }
     }
-    Ok(files)
-}
 
-/// Returns a Vector containing the AsProviderAttestations within all provided files
-fn read_aspa_records(files: &Vec<String>) -> Result<Vec<AsProviderAttestation>, Box<dyn Error>> {
-    let mut attestations: Vec<AsProviderAttestation> = Vec::new();
-    for filepath in files {
-        let data = fs::read(filepath)?;
-        let aspa = Aspa::decode(data.as_ref(), true)?;
-        attestations.push(aspa.content().clone());
+    let mut result_vec: Vec<usize> = Vec::new();
+
+    // add the min value.
+    if let Some(m) = min {
+        result_vec.push(m)
+    } else {
+        // unable to calc anything on empty map, return [0, 0, ..., 0]
+        for i in 1..percentile_list.len() + 2 {
+            result_vec.push(0);
+        }
+        return result_vec;
     }
-    Ok(attestations)
+
+    // add the percentiles
+    for value in percs
+        .percentiles(percentile_list)
+        .expect("Unable to calculate percentile statistics.")
+        .expect("Percentile calculation did not result in usable metric.")
+        .iter()
+    {
+        result_vec.push(value.round() as usize);
+    }
+
+    // add the max value.
+    result_vec.push(max);
+    result_vec
 }
 
 fn derive_attestation_statistics(attestations: &Vec<AsProviderAttestation>) {
+    // number of attestations
     let num_attests_total = attestations.len();
     let mut num_attests_ipv4: usize = 0;
     let mut num_attests_ipv6: usize = 0;
     let mut num_attests_both: usize = 0;
+
+    // providers per customer
+    let mut providers_per_customer_total: HashMap<u32, HashSet<u32>> = HashMap::new();
+    let mut providers_per_customer_ipv4: HashMap<u32, HashSet<u32>> = HashMap::new();
+    let mut providers_per_customer_ipv6: HashMap<u32, HashSet<u32>> = HashMap::new();
+    let mut providers_per_customer_both: HashMap<u32, HashSet<u32>> = HashMap::new();
 
     for attest in attestations {
         let customer = attest.customer_as().into_u32();
         let mut uses_afi_limit_ipv4 = false;
         let mut uses_afi_limit_ipv6 = false;
         for provider_as_set in attest.provider_as_set().iter() {
-            let asn: u32 = provider_as_set.provider().into_u32();
+            let provider: u32 = provider_as_set.provider().into_u32();
+            utils::add_to_hashmap_set(&mut providers_per_customer_total, &customer, &provider);
+
             if let Some(family) = provider_as_set.afi_limit() {
                 // afi limited records
                 match family {
-                    AddressFamily::Ipv4 => uses_afi_limit_ipv4 = true,
-                    AddressFamily::Ipv6 => uses_afi_limit_ipv6 = true,
+                    AddressFamily::Ipv4 => {
+                        uses_afi_limit_ipv4 = true;
+                        utils::add_to_hashmap_set(
+                            &mut providers_per_customer_ipv4,
+                            &customer,
+                            &provider,
+                        );
+                    }
+                    AddressFamily::Ipv6 => {
+                        uses_afi_limit_ipv6 = true;
+                        utils::add_to_hashmap_set(
+                            &mut providers_per_customer_ipv6,
+                            &customer,
+                            &provider,
+                        );
+                    }
                 }
+            } else {
+                // not afi_limited record
+                utils::add_to_hashmap_set(&mut providers_per_customer_ipv4, &customer, &provider);
+                utils::add_to_hashmap_set(&mut providers_per_customer_ipv6, &customer, &provider);
             }
         }
 
@@ -131,7 +191,6 @@ fn derive_attestation_statistics(attestations: &Vec<AsProviderAttestation>) {
             num_attests_ipv6 += 1
         }
     }
-
     println!("Attestations in total: {}.", num_attests_total);
     println!("Attestations with IPv4 AFI_LIMITs: {}.", num_attests_ipv4);
     println!("Attestations with IPv6 AFI_LIMITs: {}.", num_attests_ipv6);
@@ -139,14 +198,106 @@ fn derive_attestation_statistics(attestations: &Vec<AsProviderAttestation>) {
         "Attestations with IPv4 and IPv6 AFI_LIMITs: {}.",
         num_attests_both
     );
+
+    // calc the overlap between ipv4 and ipv6 hashmap sets.
+    utils::intersect_hashmap_sets(
+        &providers_per_customer_ipv4,
+        &providers_per_customer_ipv6,
+        &mut providers_per_customer_both,
+    );
+
+    let distr_provsetlen_total =
+        calc_set_site_percentiles(&providers_per_customer_total, &PERCENTILE_LIST);
+    let distr_provsetlen_ipv4 =
+        calc_set_site_percentiles(&providers_per_customer_ipv4, &PERCENTILE_LIST);
+    let distr_provsetlen_ipv6 =
+        calc_set_site_percentiles(&providers_per_customer_ipv6, &PERCENTILE_LIST);
+    let distr_provsetlen_both =
+        calc_set_site_percentiles(&providers_per_customer_both, &PERCENTILE_LIST);
+
+    println!(
+        "Distr. approx. for number of providers per customer, all attestations: {:?}",
+        distr_provsetlen_total
+    );
+    println!(
+        "Distr. approx. for number of providers per customer with Ipv4 attestations: {:?}",
+        distr_provsetlen_ipv4
+    );
+    println!(
+        "Distr. approx. for number of providers per customer with Ipv6 attestations: {:?}",
+        distr_provsetlen_ipv6
+    );
+    println!(
+        "Distr. approx. for number of providers per customer with IPv4 and IPv6 attestations: {:?}",
+        distr_provsetlen_both
+    );
+
+    println!(
+        "Number of Customer ASes with attestations: {}",
+        providers_per_customer_total.len()
+    );
+    println!(
+        "Number of Customer ASes with IPv4 attestations: {}",
+        providers_per_customer_ipv4.len()
+    );
+    println!(
+        "Number of Customer ASes with IPv6 attestations: {}",
+        providers_per_customer_ipv6.len()
+    );
+    println!(
+        "Number of Customer ASes with IPv4 and IPv6 attestations: {}",
+        providers_per_customer_both.len()
+    );
+    println!(
+        "Number of unique Provider ASes mentioned in any attestation: {}.",
+        utils::collaps_hashmap_sets_via_union(&providers_per_customer_total).len()
+    );
+    println!(
+        "Number of unique Provider ASes mentioned in IPv4 attestations: {}.",
+        utils::collaps_hashmap_sets_via_union(&providers_per_customer_ipv4).len()
+    );
+    println!(
+        "Number of unique Provider ASes mentioned in IPv6 attestations: {}.",
+        utils::collaps_hashmap_sets_via_union(&providers_per_customer_ipv6).len()
+    );
+    println!(
+        "Number of unique Provider ASes mentioned in IPv4 and IPv6 attestations: {}.",
+        utils::collaps_hashmap_sets_via_union(&providers_per_customer_both).len()
+    );
+}
+
+fn bgpkit_get_ribs_size_ordered(ts: i64) -> Vec<BrokerItem> {
+    let broker = BgpkitBroker::new()
+        .ts_start(&ts.to_string())
+        .ts_end(&ts.to_string())
+        .data_type("rib");
+
+    broker
+        .into_iter()
+        .sorted_by_key(|item| -item.rough_size)
+        .collect()
+}
+
+fn bgpkit_get_routes(target: &BrokerItem) {
+    let parser = BgpkitParser::new(target.url.as_str()).unwrap();
+
+    for (i, elem) in parser.into_elem_iter().enumerate() {
+        if i == 100 {
+            break;
+        }
+        println!("{:?}", elem);
+    }
 }
 fn main() {
     let cli_params = get_cli_parameters();
     let start_ts = parse_input_ts(&cli_params);
 
-    let aspa_files = get_asa_files("./data/asa_samples/").unwrap();
-    let attestations: Vec<AsProviderAttestation> = read_aspa_records(&aspa_files).unwrap();
-    derive_attestation_statistics(&attestations);
-    println!("{:?}", aspa_files);
-    println!("{}", start_ts);
+    let aspa_files = aspa::get_asa_files("./data/asa_samples/").unwrap();
+    let attestations: Vec<AsProviderAttestation> = aspa::read_aspa_records(&aspa_files).unwrap();
+    let rib_urls = bgpkit_get_ribs_size_ordered(start_ts);
+    for broker_item in rib_urls {
+        bgpkit_get_routes(&broker_item);
+        break;
+    }
+    // derive_attestation_statistics(&attestations);
 }
