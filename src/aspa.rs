@@ -1,4 +1,5 @@
 use bgpkit_parser::AsPath;
+use bgpkit_parser::AsPathSegment::AsSequence;
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
 use std::collections::{HashMap, HashSet};
@@ -16,6 +17,16 @@ enum OpportunisticAspaValidationState {
     NoOpportunity,
 }
 
+enum UpstreamExtractionResult {
+    SuccessTierone(Vec<u32>),     // Successful inference based on a Tier 1 ASN.
+    SuccessAttestation(Vec<u32>), // Successful inference based on an ASPA attestation.
+    SuccessRouteserver(Vec<u32>), // Successful inference based on a route server.
+    FailureAsset,                 // AS path contains AS_SET.
+    FailureInsufficient,          // successful AS match, yet match was at origin (has no sub path)
+    FailureEmpty,                 // AS path is empty.
+    FailureUncertain,             // Unable to make any opportunistic inference
+}
+
 /// This object opportunistically infers the ASPA state of AS_PATHs.
 /// In the real world, a validating router would know its business relationships and whether it is
 /// part of the down or upstream of the route. As this validator looks at paths sampled from "random"
@@ -28,9 +39,12 @@ struct OpportunisticAspaPathValidator {
     // attestation lookups per afi
     upstreams_ipv4: HashMap<u32, HashSet<u32>>,
     upstreams_ipv6: HashMap<u32, HashSet<u32>>,
-    // lists of provider-free ASes per afi -> used for up/down stream inference.
+    // lists of provider-free ASNs per afi -> used for up/down stream inference.
     tier_ones_ipv4: HashSet<u32>,
     tier_ones_ipv6: HashSet<u32>,
+    // lists of route server ASNs per afi -> used for up/down stream inference.
+    route_servers_ipv4: HashSet<u32>,
+    route_servers_ipv6: HashSet<u32>,
 }
 
 impl OpportunisticAspaPathValidator {
@@ -74,12 +88,94 @@ impl OpportunisticAspaPathValidator {
             7922, 12956,
         ]);
 
+        // Lists of Tier 1 networks, taken from https://en.wikipedia.org/wiki/Tier_1_network
+        let route_servers_ipv4: HashSet<u32> = HashSet::new();
+        let route_servers_ipv6: HashSet<u32> = HashSet::new();
+
         return Ok(OpportunisticAspaPathValidator {
             upstreams_ipv4,
             upstreams_ipv6,
             tier_ones_ipv4,
             tier_ones_ipv6,
+            route_servers_ipv4,
+            route_servers_ipv6,
         });
+    }
+
+    /// infers maximum upstream sequence from origin.
+    pub(crate) fn extract_max_upstream(
+        self,
+        as_path: &AsPath,
+        afi: AddressFamily,
+    ) -> UpstreamExtractionResult {
+        // setup resource pointers.
+        match afi {
+            AddressFamily::Ipv4 => {
+                let upstreams = self.upstreams_ipv4;
+                let tier_ones = self.tier_ones_ipv4;
+                let route_servers = self.route_servers_ipv4;
+            }
+            AddressFamily::Ipv6 => {
+                let upstreams = self.upstreams_ipv4;
+                let tier_ones = self.tier_ones_ipv4;
+                let route_servers = self.route_servers_ipv6;
+            }
+        }
+
+        // Facilitate the path object. ASPA filtering does not allow for AS_SETs, so we can simply
+        // generate a clean vector containing only the ASNs.
+        let mut path_dense: Vec<u32> = Vec::new();
+        for segment in &as_path.segments {
+            match segment {
+                AsSequence(sequence) => {
+                    for asn_obj in sequence {
+                        // is this path prepending? If so, skip adding the asn again.
+                        if !path_dense.is_empty() {
+                            // unwrap only safe if nested. No laze evaluation.
+                            if asn_obj.asn.eq(path_dense.last().unwrap()) {
+                                continue;
+                            }
+                        }
+                        path_dense.push(asn_obj.asn as u32);
+                    }
+                }
+                _ => return UpstreamExtractionResult::FailureAsset,
+            }
+        }
+
+        // is the path empty after converting it?
+        if path_dense.is_empty() {
+            return UpstreamExtractionResult::FailureEmpty;
+        }
+
+        // inference starting from origin.
+        let n = path_dense.len();
+        for (idx, asn) in path_dense.into_iter().enumerate().rev() {
+            // we hit a Tier 1 ASN, can't go higher (by definition).
+            if tier_ones.contains(asn) {
+                // unwrap safe as it returns at least itself.
+                let upstream = path_dense.get(idx..).unwrap();
+                if upstream.len().eq(1) {
+                    return UpstreamExtractionResult::FailureEmpty; // upstream too short.
+                }
+                return UpstreamExtractionResult::SuccessTierone(Vec::from(upstream));
+            }
+
+            // we hit a non-transparent route server, this should be part of aspa attestation.
+            if route_servers.contains(asn) {
+                // unwrap safe as it returns at least itself.
+                let upstream = path_dense.get(idx..).unwrap();
+                if upstream.len().eq(1) {
+                    return UpstreamExtractionResult::FailureEmpty; // upstream too short.
+                }
+                return UpstreamExtractionResult::SuccessTierone(Vec::from(upstream));
+            }
+            // ToDo: check attestations. you need to get the left-most one if there are multiuple.
+            // needs variable outside of loop.
+        }
+
+        // No opportunity to infer upstream.
+        UpstreamExtractionResult::FailureUncertain
     }
 
     pub(crate) fn validate(as_path: AsPath) -> OpportunisticAspaValidationState {
