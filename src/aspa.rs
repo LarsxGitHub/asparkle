@@ -8,7 +8,7 @@ use std::fs;
 
 use crate::utils;
 
-enum OpportunisticAspaValidationState {
+pub(crate) enum OpportunisticAspaValidationState {
     Valid,
     InvalidAsset,
     InvalidPeerasn,
@@ -17,7 +17,7 @@ enum OpportunisticAspaValidationState {
     NoOpportunity,
 }
 
-enum UpstreamExtractionResult {
+pub(crate) enum UpstreamExtractionResult {
     SuccessTierone(Vec<u32>),     // Successful inference based on a Tier 1 ASN.
     SuccessAttestation(Vec<u32>), // Successful inference based on an ASPA attestation.
     SuccessRouteserver(Vec<u32>), // Successful inference based on a route server.
@@ -35,7 +35,7 @@ enum UpstreamExtractionResult {
 /// Hence, this validator needs to infer which part of the path belongs to the
 /// upstream and which part belongs to the downstream. It does so opportunistically and performs
 /// ASPA validation on the upstream part of the path.
-struct OpportunisticAspaPathValidator {
+pub(crate) struct OpportunisticAspaPathValidator {
     // attestation lookups per afi
     upstreams_ipv4: HashMap<u32, HashSet<u32>>,
     upstreams_ipv6: HashMap<u32, HashSet<u32>>,
@@ -49,7 +49,7 @@ struct OpportunisticAspaPathValidator {
 
 impl OpportunisticAspaPathValidator {
     pub(crate) fn new(
-        attestations: Vec<AsProviderAttestation>,
+        attestations: &Vec<AsProviderAttestation>,
     ) -> Result<OpportunisticAspaPathValidator, Box<dyn Error>> {
         let mut upstreams_ipv4: HashMap<u32, HashSet<u32>> = HashMap::new();
         let mut upstreams_ipv6: HashMap<u32, HashSet<u32>> = HashMap::new();
@@ -104,22 +104,18 @@ impl OpportunisticAspaPathValidator {
 
     /// infers maximum upstream sequence from origin.
     pub(crate) fn extract_max_upstream(
-        self,
+        &self,
         as_path: &AsPath,
         afi: AddressFamily,
     ) -> UpstreamExtractionResult {
         // setup resource pointers.
-        match afi {
-            AddressFamily::Ipv4 => {
-                let upstreams = self.upstreams_ipv4;
-                let tier_ones = self.tier_ones_ipv4;
-                let route_servers = self.route_servers_ipv4;
-            }
-            AddressFamily::Ipv6 => {
-                let upstreams = self.upstreams_ipv4;
-                let tier_ones = self.tier_ones_ipv4;
-                let route_servers = self.route_servers_ipv6;
-            }
+        let mut upstreams = &self.upstreams_ipv4;
+        let mut tier_ones = &self.tier_ones_ipv4;
+        let mut route_servers = &self.route_servers_ipv4;
+        if let AddressFamily::Ipv6 = afi {
+            upstreams = &self.upstreams_ipv4;
+            tier_ones = &self.tier_ones_ipv4;
+            route_servers = &self.route_servers_ipv6;
         }
 
         // Facilitate the path object. ASPA filtering does not allow for AS_SETs, so we can simply
@@ -149,37 +145,75 @@ impl OpportunisticAspaPathValidator {
         }
 
         // inference starting from origin.
-        let n = path_dense.len();
-        for (idx, asn) in path_dense.into_iter().enumerate().rev() {
+        let empty_default_hashset: HashSet<u32> = HashSet::new();
+        let mut last_valid_upstream_idx: Option<usize> = None;
+        for (idx, asn) in path_dense.clone().into_iter().enumerate().rev() {
             // we hit a Tier 1 ASN, can't go higher (by definition).
-            if tier_ones.contains(asn) {
+            if tier_ones.contains(&asn) {
                 // unwrap safe as it returns at least itself.
                 let upstream = path_dense.get(idx..).unwrap();
-                if upstream.len().eq(1) {
+                if upstream.len() == 1 {
                     return UpstreamExtractionResult::FailureEmpty; // upstream too short.
                 }
                 return UpstreamExtractionResult::SuccessTierone(Vec::from(upstream));
             }
 
-            // we hit a non-transparent route server, this should be part of aspa attestation.
-            if route_servers.contains(asn) {
+            // we hit a non-transparent route server (which might be part of an aspa attestation.)
+            if route_servers.contains(&asn) {
                 // unwrap safe as it returns at least itself.
                 let upstream = path_dense.get(idx..).unwrap();
-                if upstream.len().eq(1) {
+                if upstream.len() == 1 {
                     return UpstreamExtractionResult::FailureEmpty; // upstream too short.
                 }
-                return UpstreamExtractionResult::SuccessTierone(Vec::from(upstream));
+                return UpstreamExtractionResult::SuccessRouteserver(Vec::from(upstream));
             }
-            // ToDo: check attestations. you need to get the left-most one if there are multiuple.
-            // needs variable outside of loop.
+
+            // make sure we are not at the left-most link and that this asn has an ASPA record.
+            if (idx == 0) | !upstreams.contains_key(&asn) {
+                continue;
+            }
+
+            // check if next ASN is valid upstream.
+            // unwrap safe due to previous check + iteration order
+            let asn_up = path_dense.get(idx - 1).unwrap();
+            if upstreams.get(&asn).unwrap().contains(asn_up) {
+                // next asn is a valid upstream. Remember for now as we may be able to get higher up.
+                last_valid_upstream_idx = Some(idx - 1);
+            }
+        }
+
+        // There was a valid upstream somewhere in the path.
+        if let Some(idx) = last_valid_upstream_idx {
+            // unwrap safe, contains at least two ASNs.
+            let upstream = path_dense.get(idx..).unwrap();
+            return UpstreamExtractionResult::SuccessAttestation(Vec::from(upstream));
         }
 
         // No opportunity to infer upstream.
         UpstreamExtractionResult::FailureUncertain
     }
 
-    pub(crate) fn validate(as_path: AsPath) -> OpportunisticAspaValidationState {
+    pub(crate) fn validate(
+        &self,
+        as_path: AsPath,
+        afi: AddressFamily,
+    ) -> OpportunisticAspaValidationState {
         // Todo: run opportunistic validation
+        let mut subpath: Option<Vec<u32>> = None;
+        match self.extract_max_upstream(&as_path, afi) {
+            UpstreamExtractionResult::SuccessAttestation(res) => subpath = Some(res),
+            UpstreamExtractionResult::SuccessTierone(res) => subpath = Some(res),
+            UpstreamExtractionResult::SuccessRouteserver(res) => subpath = Some(res),
+            _ => subpath = None,
+        }
+
+        if let Some(upstream) = subpath {
+            println!(
+                "The AS path {:?} contains the upstream {:?}.",
+                as_path.to_string(),
+                upstream
+            )
+        }
         OpportunisticAspaValidationState::Unknown
     }
 }

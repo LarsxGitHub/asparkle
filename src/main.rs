@@ -278,14 +278,23 @@ fn bgpkit_get_ribs_size_ordered(ts: i64) -> Vec<BrokerItem> {
         .collect()
 }
 
-fn bgpkit_get_routes(target: &BrokerItem) {
+fn bgpkit_get_routes(target: &BrokerItem, attestations: &Vec<AsProviderAttestation>) {
     let parser = BgpkitParser::new(target.url.as_str()).unwrap();
 
+    let aspaval = aspa::OpportunisticAspaPathValidator::new(attestations).unwrap();
     for (i, elem) in parser.into_elem_iter().enumerate() {
         if i == 100 {
             break;
         }
-        println!("{:?}", elem);
+
+        if let Some(path) = elem.as_path {
+            let afi = match elem.prefix.prefix.is_ipv4() {
+                true => AddressFamily::Ipv4,
+                false => AddressFamily::Ipv6,
+            };
+
+            aspaval.validate(path, afi);
+        }
     }
 }
 fn main() {
@@ -296,7 +305,7 @@ fn main() {
     let attestations: Vec<AsProviderAttestation> = aspa::read_aspa_records(&aspa_files).unwrap();
     let rib_urls = bgpkit_get_ribs_size_ordered(start_ts);
     for broker_item in rib_urls {
-        bgpkit_get_routes(&broker_item);
+        bgpkit_get_routes(&broker_item, &attestations);
         break;
     }
     // derive_attestation_statistics(&attestations);
