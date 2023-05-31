@@ -95,6 +95,7 @@ dependencies = [
  "itertools",
  "log",
  "rpki",
+ "serde_json",
  "stats-cli",
 ]
 

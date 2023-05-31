@@ -17,6 +17,7 @@ use std::process::exit;
 const PERCENTILE_LIST: [f64; 7] = [0.05, 0.10, 0.25, 0.5, 0.75, 0.90, 0.95];
 
 mod aspa;
+mod peeringdb;
 mod utils;
 
 #[macro_export]
@@ -298,6 +299,7 @@ fn bgpkit_get_routes(target: &BrokerItem, attestations: &Vec<AsProviderAttestati
     }
 }
 fn main() {
+    /*
     let cli_params = get_cli_parameters();
     let start_ts = parse_input_ts(&cli_params);
 
@@ -308,5 +310,9 @@ fn main() {
         bgpkit_get_routes(&broker_item, &attestations);
         break;
     }
+    */
+    let file_path =
+        "/Users/lprehn/CLionProjects/aspa-observatory/data/pdb/peeringdb_2_dump_2023_05_01.json";
+    peeringdb::load_pdb_json_from_file(file_path);
     // derive_attestation_statistics(&attestations);
 }
