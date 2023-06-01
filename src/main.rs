@@ -313,6 +313,15 @@ fn main() {
     */
     let file_path =
         "/Users/lprehn/CLionProjects/aspa-observatory/data/pdb/peeringdb_2_dump_2023_05_01.json";
-    peeringdb::load_pdb_json_from_file(file_path);
+    let pdb_json = peeringdb::load_pdb_json_from_file(file_path);
+
+    let mut route_servers_v4: HashSet<u32> = HashSet::new();
+    let mut route_servers_v6: HashSet<u32> = HashSet::new();
+    peeringdb::extract_route_servers(pdb_json, &mut route_servers_v4, &mut route_servers_v6);
+    println!(
+        "Read {} IPv4 and {} IPv6 Route Server ASNs.",
+        route_servers_v4.len(),
+        route_servers_v6.len()
+    )
     // derive_attestation_statistics(&attestations);
 }
