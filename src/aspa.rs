@@ -1,5 +1,6 @@
-use bgpkit_parser::AsPath;
-use bgpkit_parser::AsPathSegment::AsSequence;
+use bgpkit_parser::models::AsPathSegment;
+use bgpkit_parser::BgpElem;
+use ipnet::IpNet;
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
 use std::collections::{HashMap, HashSet};
@@ -8,6 +9,7 @@ use std::fs;
 
 use crate::utils;
 
+#[derive(Debug)]
 pub(crate) enum OpportunisticAspaValidationState {
     Valid,
     InvalidAsset,
@@ -17,14 +19,30 @@ pub(crate) enum OpportunisticAspaValidationState {
     NoOpportunity,
 }
 
+#[derive(Debug)]
+pub(crate) enum UpInfSuccessReason {
+    SuccessTierone,        // Successful inference based on a Tier 1 ASN.
+    SuccessTieronePeer,    // Successful inference based on the next hop of a Tier 1 ASN.
+    SuccessRcpTierone, // Successful inference based the Route collector peer being a Tier 1 ASN.
+    SuccessAttestation, // Successful inference based on an ASPA attestation.
+    SuccessRouteserver, // Successful inference based on a route server.
+    SuccessRcpRouteserver, // Successful inference based on Route collector peer being a route server.
+    SuccessOtc,            // Successful inference based on only-to-customer attribute.
+}
+
+#[derive(Debug)]
+pub(crate) enum UpInfFailReason {
+    FailureAsset,        // AS path contains AS_SET.
+    FailureInsufficient, // successful AS match, yet match was at origin (has no sub path)
+    FailureEmpty,        // AS path is empty or None
+    FailureUncertain,    // Unable to make any opportunistic inference
+    FailureNone,         // the is not Some(as_path) in the BgpElem.
+}
+
+#[derive(Debug)]
 pub(crate) enum UpstreamExtractionResult {
-    SuccessTierone(Vec<u32>),     // Successful inference based on a Tier 1 ASN.
-    SuccessAttestation(Vec<u32>), // Successful inference based on an ASPA attestation.
-    SuccessRouteserver(Vec<u32>), // Successful inference based on a route server.
-    FailureAsset,                 // AS path contains AS_SET.
-    FailureInsufficient,          // successful AS match, yet match was at origin (has no sub path)
-    FailureEmpty,                 // AS path is empty.
-    FailureUncertain,             // Unable to make any opportunistic inference
+    Success(Vec<u32>, UpInfSuccessReason),
+    Failure(UpInfFailReason),
 }
 
 /// This object opportunistically infers the ASPA state of AS_PATHs.
@@ -103,27 +121,28 @@ impl OpportunisticAspaPathValidator {
     }
 
     /// infers maximum upstream sequence from origin.
-    pub(crate) fn extract_max_upstream(
-        &self,
-        as_path: &AsPath,
-        afi: AddressFamily,
-    ) -> UpstreamExtractionResult {
-        // setup resource pointers.
+    pub(crate) fn extract_max_upstream(&self, elem: &BgpElem) -> UpstreamExtractionResult {
+        // if no path is included, we can't infer upstream.
+        if elem.as_path.is_none() {
+            return UpstreamExtractionResult::Failure(UpInfFailReason::FailureNone);
+        }
+
+        // setup resource pointers for correct afi.
         let mut upstreams = &self.upstreams_ipv4;
         let mut tier_ones = &self.tier_ones_ipv4;
         let mut route_servers = &self.route_servers_ipv4;
-        if let AddressFamily::Ipv6 = afi {
-            upstreams = &self.upstreams_ipv4;
-            tier_ones = &self.tier_ones_ipv4;
+        if let IpNet::V6(_) = elem.prefix.prefix {
+            upstreams = &self.upstreams_ipv6;
+            tier_ones = &self.tier_ones_ipv6;
             route_servers = &self.route_servers_ipv6;
         }
 
         // Facilitate the path object. ASPA filtering does not allow for AS_SETs, so we can simply
         // generate a clean vector containing only the ASNs.
         let mut path_dense: Vec<u32> = Vec::new();
-        for segment in &as_path.segments {
+        for segment in &elem.as_path.as_ref().unwrap().segments {
             match segment {
-                AsSequence(sequence) => {
+                AsPathSegment::AsSequence(sequence) => {
                     for asn_obj in sequence {
                         // is this path prepending? If so, skip adding the asn again.
                         if !path_dense.is_empty() {
@@ -135,37 +154,89 @@ impl OpportunisticAspaPathValidator {
                         path_dense.push(asn_obj.asn as u32);
                     }
                 }
-                _ => return UpstreamExtractionResult::FailureAsset,
+                _ => return UpstreamExtractionResult::Failure(UpInfFailReason::FailureAsset),
             }
         }
 
         // is the path empty after converting it?
         if path_dense.is_empty() {
-            return UpstreamExtractionResult::FailureEmpty;
+            return UpstreamExtractionResult::Failure(UpInfFailReason::FailureEmpty);
         }
 
-        // inference starting from origin.
-        let empty_default_hashset: HashSet<u32> = HashSet::new();
+        // Dense, non-empty AS path -> now we can check for opportunities to infer the upstream
+        // 1. RC peer is Tier 1 network, return full path
+        if tier_ones.contains(&elem.peer_asn.asn) {
+            return UpstreamExtractionResult::Success(
+                path_dense,
+                UpInfSuccessReason::SuccessRcpTierone,
+            );
+        }
+
+        // 2. RC peer is a Route Server (either in-list, or peer_asn is not first_hop)
+        if (route_servers.contains(&elem.peer_asn.asn)) | (path_dense[0] != elem.peer_asn.asn) {
+            return UpstreamExtractionResult::Success(
+                path_dense,
+                UpInfSuccessReason::SuccessRcpRouteserver,
+            );
+        }
+
+        // 3. in Only-to-Customer we trust.
+        if let Some(top_asn) = elem.only_to_customer {
+            //  check whether the contained ASN is actually part of the path.
+            if let Some(idx) = path_dense.iter().position(|&asn| asn == top_asn) {
+                return UpstreamExtractionResult::Success(
+                    Vec::from(path_dense.get(idx..).unwrap()),
+                    UpInfSuccessReason::SuccessOtc,
+                );
+            }
+        }
+
+        // On-path inference starts here, opportunities 4, 5, and 6.
         let mut last_valid_upstream_idx: Option<usize> = None;
         for (idx, asn) in path_dense.clone().into_iter().enumerate().rev() {
-            // we hit a Tier 1 ASN, can't go higher (by definition).
+            // 4. we hit a Tier 1 ASN, can't go higher.
             if tier_ones.contains(&asn) {
-                // unwrap safe as it returns at least itself.
-                let upstream = path_dense.get(idx..).unwrap();
-                if upstream.len() == 1 {
-                    return UpstreamExtractionResult::FailureEmpty; // upstream too short.
+                let mut start_idx = idx;
+                // can't go up, but how about sideways?
+                if idx > 0 {
+                    let next_hop = path_dense.get(idx - 1).unwrap();
+                    if tier_ones.contains(next_hop) | route_servers.contains(next_hop) {
+                        start_idx = idx - 1;
+                    }
                 }
-                return UpstreamExtractionResult::SuccessTierone(Vec::from(upstream));
+                // unwrap safe as it returns at least itself.
+                let upstream = path_dense.get(start_idx..).unwrap();
+
+                // path is too short for aspa validation ...
+                if upstream.len() == 1 {
+                    return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
+                }
+
+                // make sure to report the correct reasoning.
+                if idx == start_idx {
+                    return UpstreamExtractionResult::Success(
+                        Vec::from(upstream),
+                        UpInfSuccessReason::SuccessTierone,
+                    );
+                } else {
+                    return UpstreamExtractionResult::Success(
+                        Vec::from(upstream),
+                        UpInfSuccessReason::SuccessTieronePeer,
+                    );
+                }
             }
 
-            // we hit a non-transparent route server (which might be part of an aspa attestation.)
+            // 5. we hit a non-transparent route server (which might be part of an aspa attestation.)
             if route_servers.contains(&asn) {
                 // unwrap safe as it returns at least itself.
                 let upstream = path_dense.get(idx..).unwrap();
                 if upstream.len() == 1 {
-                    return UpstreamExtractionResult::FailureEmpty; // upstream too short.
+                    return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
                 }
-                return UpstreamExtractionResult::SuccessRouteserver(Vec::from(upstream));
+                return UpstreamExtractionResult::Success(
+                    Vec::from(upstream),
+                    UpInfSuccessReason::SuccessRouteserver,
+                );
             }
 
             // make sure we are not at the left-most link and that this asn has an ASPA record.
@@ -173,7 +244,7 @@ impl OpportunisticAspaPathValidator {
                 continue;
             }
 
-            // check if next ASN is valid upstream.
+            // 6. check if next ASN is an aspa-valid upstream.
             // unwrap safe due to previous check + iteration order
             let asn_up = path_dense.get(idx - 1).unwrap();
             if upstreams.get(&asn).unwrap().contains(asn_up) {
@@ -186,34 +257,19 @@ impl OpportunisticAspaPathValidator {
         if let Some(idx) = last_valid_upstream_idx {
             // unwrap safe, contains at least two ASNs.
             let upstream = path_dense.get(idx..).unwrap();
-            return UpstreamExtractionResult::SuccessAttestation(Vec::from(upstream));
+            return UpstreamExtractionResult::Success(
+                Vec::from(upstream),
+                UpInfSuccessReason::SuccessAttestation,
+            );
         }
 
         // No opportunity to infer upstream.
-        UpstreamExtractionResult::FailureUncertain
+        UpstreamExtractionResult::Failure(UpInfFailReason::FailureUncertain)
     }
 
-    pub(crate) fn validate(
-        &self,
-        as_path: AsPath,
-        afi: AddressFamily,
-    ) -> OpportunisticAspaValidationState {
+    pub(crate) fn validate(&self, elem: BgpElem) -> OpportunisticAspaValidationState {
         // Todo: run opportunistic validation
-        let mut subpath: Option<Vec<u32>> = None;
-        match self.extract_max_upstream(&as_path, afi) {
-            UpstreamExtractionResult::SuccessAttestation(res) => subpath = Some(res),
-            UpstreamExtractionResult::SuccessTierone(res) => subpath = Some(res),
-            UpstreamExtractionResult::SuccessRouteserver(res) => subpath = Some(res),
-            _ => subpath = None,
-        }
 
-        if let Some(upstream) = subpath {
-            println!(
-                "The AS path {:?} contains the upstream {:?}.",
-                as_path.to_string(),
-                upstream
-            )
-        }
         OpportunisticAspaValidationState::Unknown
     }
 }

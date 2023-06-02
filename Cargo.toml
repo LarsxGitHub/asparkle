@@ -6,8 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bgpkit-parser = "0.7.2"
-bgpkit-broker = "0.6"
+bgpkit-parser = "0.9.4"
+bgpkit-broker = "0.6.1"
 chrono = "0.4.24"
 clap = "4.3.0"
 log = "0.4.17"
@@ -15,3 +15,4 @@ rpki = {version="0.15.10", features = ["repository"]}
 stats-cli = "3.0.1"
 itertools = "0.10.5"
 serde_json = "1.0.96"
+ipnet = "2.7.2"

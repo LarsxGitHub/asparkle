@@ -3,7 +3,9 @@ use bgpkit_parser::BgpkitParser;
 use chrono::{DateTime, FixedOffset, NaiveDate};
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
+use std::any::Any;
 
+use crate::aspa::UpstreamExtractionResult;
 use clap::{Arg, ArgMatches};
 use inc_stats::Percentiles;
 use itertools::Itertools;
@@ -288,18 +290,17 @@ fn bgpkit_get_routes(target: &BrokerItem, attestations: &Vec<AsProviderAttestati
             break;
         }
 
-        if let Some(path) = elem.as_path {
-            let afi = match elem.prefix.prefix.is_ipv4() {
-                true => AddressFamily::Ipv4,
-                false => AddressFamily::Ipv6,
-            };
-
-            aspaval.validate(path, afi);
+        match aspaval.extract_max_upstream(&elem) {
+            UpstreamExtractionResult::Success(upstream, reason) => {
+                println!("inferred upstream {:?} based on {:?}", upstream, reason);
+            }
+            UpstreamExtractionResult::Failure(reason) => {
+                println!("Failed to infer upstream based on {:?}", reason);
+            }
         }
     }
 }
 fn main() {
-    /*
     let cli_params = get_cli_parameters();
     let start_ts = parse_input_ts(&cli_params);
 
@@ -310,7 +311,7 @@ fn main() {
         bgpkit_get_routes(&broker_item, &attestations);
         break;
     }
-    */
+
     let file_path =
         "/Users/lprehn/CLionProjects/aspa-observatory/data/pdb/peeringdb_2_dump_2023_05_01.json";
     let pdb_json = peeringdb::load_pdb_json_from_file(file_path);
