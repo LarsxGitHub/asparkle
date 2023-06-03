@@ -668,4 +668,75 @@ mod tests {
         let elem = elem_from_specification(&[64505, 64506, 64499], 64505, true, None);
         assert_failure(&aspa_val, &elem, UpInfFailReason::FailureUncertain)
     }
+
+    #[test]
+    fn test_extract_max_upstream_failure_asset() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // Generate an BgpElem with AS_Set in path
+        let mut elem: BgpElem = Default::default();
+        elem.as_path = Some(AsPath {
+            segments: vec![
+                AsPathSegment::AsSet(vec![64501.into()]),
+                AsPathSegment::AsSequence(
+                    [64505, 64506, 64499]
+                        .iter()
+                        .map(|asn| (*asn).into())
+                        .collect(),
+                ),
+            ],
+        });
+        elem.peer_asn = 64505.into();
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureAsset)
+    }
+
+    #[test]
+    fn test_extract_max_upstream_failure_none() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // Generate an BgpElem with AS_Set in path
+        let mut elem: BgpElem = Default::default();
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureNone)
+    }
+
+    #[test]
+    fn test_extract_max_upstream_failure_empty() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // Generate an BgpElem with AS_Set in path
+        let mut elem: BgpElem = Default::default();
+        elem.as_path = Some(AsPath { segments: vec![] });
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureEmpty)
+    }
+
+    #[test]
+    fn test_extract_max_upstream_failure_uncertain() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // failure test, attest in ipv6 but not ipv4
+        let elem = elem_from_specification(&[64505, 64506, 64499], 64505, true, None);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureUncertain)
+    }
+
+    #[test]
+    fn test_extract_max_upstream_failure_insufficient() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // Failure test otc
+        let elem = elem_from_specification(&[64504], 64504, true, Some(64504));
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+
+        // Failure test route server
+        let elem = elem_from_specification(&[64510], 64510, true, None);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+
+        // Failure test tier one
+        let elem = elem_from_specification(&[64502, 64510], 64502, true, None);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
 }
