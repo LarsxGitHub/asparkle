@@ -166,8 +166,8 @@ impl OpportunisticAspaPathValidator {
     /// Adds sets of route server ASNs for the validation.
     pub(crate) fn add_route_servers(
         &mut self,
-        route_servers_ipv4: HashSet<u32>,
-        route_servers_ipv6: HashSet<u32>,
+        route_servers_ipv4: &HashSet<u32>,
+        route_servers_ipv6: &HashSet<u32>,
     ) {
         self.route_servers_ipv4.extend(route_servers_ipv4);
         self.route_servers_ipv6.extend(route_servers_ipv6);
@@ -219,28 +219,40 @@ impl OpportunisticAspaPathValidator {
         // Dense, non-empty AS path -> now we can check for opportunities to infer the upstream
         // 1. RC peer is Tier 1 network, return full path
         if tier_ones.contains(&elem.peer_asn.asn) {
-            return UpstreamExtractionResult::Success(
-                path_dense,
-                UpInfSuccessReason::SuccessRcpTierone,
-            );
+            if path_dense.len() > 1 {
+                return UpstreamExtractionResult::Success(
+                    path_dense,
+                    UpInfSuccessReason::SuccessRcpTierone,
+                );
+            } else {
+                return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
+            }
         }
 
         // 2. RC peer is a Route Server (either in-list, or peer_asn is not first_hop)
         if (route_servers.contains(&elem.peer_asn.asn)) | (path_dense[0] != elem.peer_asn.asn) {
-            return UpstreamExtractionResult::Success(
-                path_dense,
-                UpInfSuccessReason::SuccessRcpRouteserver,
-            );
+            if path_dense.len() > 1 {
+                return UpstreamExtractionResult::Success(
+                    path_dense,
+                    UpInfSuccessReason::SuccessRcpRouteserver,
+                );
+            } else {
+                return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
+            }
         }
 
         // 3. in Only-to-Customer we trust.
         if let Some(top_asn) = elem.only_to_customer {
             //  check whether the contained ASN is actually part of the path.
             if let Some(idx) = path_dense.iter().position(|&asn| asn == top_asn) {
-                return UpstreamExtractionResult::Success(
-                    Vec::from(path_dense.get(idx..).unwrap()),
-                    UpInfSuccessReason::SuccessOtc,
-                );
+                if path_dense.len() > 1 {
+                    return UpstreamExtractionResult::Success(
+                        Vec::from(path_dense.get(idx..).unwrap()),
+                        UpInfSuccessReason::SuccessOtc,
+                    );
+                } else {
+                    return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
+                }
             }
         }
 
@@ -381,21 +393,33 @@ mod tests {
         // generating attestations, testing asn ranges (64496 - 64511) as defined in RFC 5398.
         let mut upstreams_v4: HashMap<u32, HashSet<u32>> = HashMap::new();
         utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64500);
-        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64501);
+        utils::add_to_hashmap_set(&mut upstreams_v4, &64500, &64509);
         utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64504);
         let mut upstreams_v6: HashMap<u32, HashSet<u32>> = HashMap::new();
-        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64500);
-        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64501);
+        utils::add_to_hashmap_set(&mut upstreams_v6, &64499, &64500);
+        utils::add_to_hashmap_set(&mut upstreams_v6, &64500, &64509);
         utils::add_to_hashmap_set(&mut upstreams_v6, &64499, &64506);
+
+        // generating route servers
+        let mut route_servers_v4: HashSet<u32> = HashSet::new();
+        route_servers_v4.insert(64510);
+        let mut route_servers_v6: HashSet<u32> = HashSet::new();
+        route_servers_v6.insert(64511);
 
         // instantiate OpportunisticAspaPathValidator
         let mut aspa_val = OpportunisticAspaPathValidator::new();
         aspa_val.add_upstreams_directly(&upstreams_v4, &upstreams_v6);
+        aspa_val.add_route_servers(&route_servers_v4, &route_servers_v6);
         aspa_val
     }
 
     /// Convenience function that derives a BgpElem object from the input parameters.
-    fn elem_from_specification(segment_path: &[u32], peer_asn: u32, ipv4: bool) -> BgpElem {
+    fn elem_from_specification(
+        segment_path: &[u32],
+        peer_asn: u32,
+        ipv4: bool,
+        otc: Option<u32>,
+    ) -> BgpElem {
         // convert as path to correct form.
         let path = segment_path.iter().map(|asn| (*asn).into()).collect();
 
@@ -408,6 +432,7 @@ mod tests {
             true => NetworkPrefix::from_str("0.0.0.0/0").unwrap(),
             false => NetworkPrefix::from_str("0::/0").unwrap(),
         };
+        elem.only_to_customer = otc;
         elem.peer_asn = peer_asn.into();
         elem
     }
@@ -427,8 +452,8 @@ mod tests {
                 );
                 assert_eq!(
                     reason_expected, reason,
-                    "Expected Success reason {:?}, got success reason {:?}",
-                    reason_expected, reason
+                    "Expected Success reason {:?}, got success reason {:?} for upstream {:?}",
+                    reason_expected, reason, upstream
                 );
             }
             UpstreamExtractionResult::Failure(reason) => {
@@ -458,12 +483,12 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_successtierone() {
+    fn test_extract_max_upstream_success_tierone() {
         // provide setup
         let aspa_val = setup_validator();
 
         // success test
-        let elem = elem_from_specification(&[64503, 64502, 174, 64501, 64500], 64503, true);
+        let elem = elem_from_specification(&[64503, 64502, 174, 64501, 64500], 64503, true, None);
         assert_success(
             &aspa_val,
             &elem,
@@ -472,7 +497,175 @@ mod tests {
         );
 
         // Failure test
-        let elem = elem_from_specification(&[64503, 64502, 174], 64503, true);
+        let elem = elem_from_specification(&[64503, 64502, 174], 64503, true, None);
         assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
+
+    #[test]
+    fn test_extract_max_upstream_success_routeserver() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // success test, non-transparent route server
+        let elem = elem_from_specification(&[64503, 64510, 64502, 64501, 64500], 64503, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64510, 64502, 64501, 64500],
+            UpInfSuccessReason::SuccessRouteserver,
+        );
+
+        // Failure test
+        let elem = elem_from_specification(&[64502, 64510], 64502, true, None);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
+
+    #[test]
+    fn test_extract_max_upstream_success_tieronepeer() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // success test route server v4
+        let elem = elem_from_specification(&[64503, 64510, 701, 64501, 64500], 64503, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64510, 701, 64501, 64500],
+            UpInfSuccessReason::SuccessTieronePeer,
+        );
+
+        // success test route server v6
+        let elem = elem_from_specification(&[64503, 64511, 701, 64501, 64500], 64503, false, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64511, 701, 64501, 64500],
+            UpInfSuccessReason::SuccessTieronePeer,
+        );
+
+        // success test second tier 1
+        let elem = elem_from_specification(&[64503, 174, 701, 64501, 64500], 64503, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![174, 701, 64501, 64500],
+            UpInfSuccessReason::SuccessTieronePeer,
+        );
+
+        // success test second tier 1, yet only one of them is also a tier 1 in ipv6
+        let elem = elem_from_specification(&[64503, 174, 701, 64501, 64500], 64503, false, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![701, 64501, 64500],
+            UpInfSuccessReason::SuccessTierone,
+        );
+    }
+
+    #[test]
+    fn test_extract_max_upstream_success_rcptierone() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // success test
+        let elem = elem_from_specification(&[701, 64503, 64502, 64501, 64500], 701, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![701, 64503, 64502, 64501, 64500],
+            UpInfSuccessReason::SuccessRcpTierone,
+        );
+
+        // Failure test
+        let elem = elem_from_specification(&[701], 701, true, None);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
+
+    #[test]
+    fn test_extract_max_upstream_success_rcprouteserver() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // success test, non-transparent route server
+        let elem = elem_from_specification(&[64510, 64503, 64502, 64501, 64500], 64510, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64510, 64503, 64502, 64501, 64500],
+            UpInfSuccessReason::SuccessRcpRouteserver,
+        );
+
+        // success test, transparent route server
+        let elem = elem_from_specification(&[64503, 64502, 64501, 64500], 64510, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64503, 64502, 64501, 64500],
+            UpInfSuccessReason::SuccessRcpRouteserver,
+        );
+
+        // Failure test
+        let elem = elem_from_specification(&[64510], 64510, true, None);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
+
+    #[test]
+    fn test_extract_max_upstream_success_otc() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // success test
+        let elem = elem_from_specification(&[64503, 64502, 64501, 64500], 64503, true, Some(64502));
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64502, 64501, 64500],
+            UpInfSuccessReason::SuccessOtc,
+        );
+
+        // Failure test as 64504 is not on-path.
+        let elem = elem_from_specification(&[64503, 64502, 64501, 64500], 64503, true, Some(64504));
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureUncertain);
+
+        // Failure test
+        let elem = elem_from_specification(&[64504], 64504, true, Some(64504));
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
+
+    #[test]
+    fn test_extract_max_upstream_success_attestation() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // success test, some attestation
+        let elem = elem_from_specification(&[64503, 64501, 64500, 64499], 64503, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64500, 64499],
+            UpInfSuccessReason::SuccessAttestation,
+        );
+
+        // success test, multiple attestations
+        let elem = elem_from_specification(&[64503, 64509, 64500, 64499], 64503, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64509, 64500, 64499],
+            UpInfSuccessReason::SuccessAttestation,
+        );
+
+        // success test, attest in ipv6 but not ipv4
+        let elem = elem_from_specification(&[64505, 64506, 64499], 64505, false, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64506, 64499],
+            UpInfSuccessReason::SuccessAttestation,
+        );
+
+        // failure test, attest in ipv6 but not ipv4
+        let elem = elem_from_specification(&[64505, 64506, 64499], 64505, true, None);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureUncertain)
     }
 }
