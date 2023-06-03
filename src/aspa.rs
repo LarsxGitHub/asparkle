@@ -9,7 +9,7 @@ use std::fs;
 
 use crate::utils;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum OpportunisticAspaValidationState {
     Valid,
     InvalidAsset,
@@ -19,7 +19,7 @@ pub(crate) enum OpportunisticAspaValidationState {
     NoOpportunity,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum UpInfSuccessReason {
     SuccessTierone,        // Successful inference based on a Tier 1 ASN.
     SuccessTieronePeer,    // Successful inference based on the next hop of a Tier 1 ASN.
@@ -30,7 +30,7 @@ pub(crate) enum UpInfSuccessReason {
     SuccessOtc,            // Successful inference based on only-to-customer attribute.
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum UpInfFailReason {
     FailureAsset,        // AS path contains AS_SET.
     FailureInsufficient, // successful AS match, yet match was at origin (has no sub path)
@@ -39,7 +39,7 @@ pub(crate) enum UpInfFailReason {
     FailureNone,         // the is not Some(as_path) in the BgpElem.
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum UpstreamExtractionResult {
     Success(Vec<u32>, UpInfSuccessReason),
     Failure(UpInfFailReason),
@@ -66,12 +66,70 @@ pub(crate) struct OpportunisticAspaPathValidator {
 }
 
 impl OpportunisticAspaPathValidator {
-    pub(crate) fn new(
-        attestations: &Vec<AsProviderAttestation>,
-    ) -> Result<OpportunisticAspaPathValidator, Box<dyn Error>> {
+    pub(crate) fn new() -> OpportunisticAspaPathValidator {
+        // Set of Providers for Customer ASes.
         let mut upstreams_ipv4: HashMap<u32, HashSet<u32>> = HashMap::new();
         let mut upstreams_ipv6: HashMap<u32, HashSet<u32>> = HashMap::new();
 
+        // Set of router server ASNs.
+        let route_servers_ipv4: HashSet<u32> = HashSet::new();
+        let route_servers_ipv6: HashSet<u32> = HashSet::new();
+
+        // Lists of Tier 1 networks, taken from https://en.wikipedia.org/wiki/Tier_1_network
+        let tier_ones_ipv4 = HashSet::from([
+            174, 701, 1239, 1299, 2828, 2914, 3257, 3320, 3356, 3491, 5511, 6453, 6461, 6762, 6830,
+            7018, 7922, 12956,
+        ]);
+        let tier_ones_ipv6 = HashSet::from([
+            701, 1239, 1299, 2914, 3257, 3320, 3356, 3491, 5511, 6453, 6461, 6762, 6830, 7018,
+            7922, 12956,
+        ]);
+
+        OpportunisticAspaPathValidator {
+            upstreams_ipv4,
+            upstreams_ipv6,
+            tier_ones_ipv4,
+            tier_ones_ipv6,
+            route_servers_ipv4,
+            route_servers_ipv6,
+        }
+    }
+
+    /// Extends the Provider sets that are used for inference and validation.
+    ///
+    /// Deeply personal comment: While this function might be handy in awkward situations, you'd
+    /// rather use the add_upstreams_from_attestations(...) function in most situations (as it
+    /// allows you to skip juggling around the AsProviderAttestation yourself after reading them,
+    /// e.g., from a file. This function primarily exists as, for the life of me, I couldn't figure
+    /// out a way to craft AsProviderAttestation objects for testing. I know that the rpki library
+    /// shows how to do it at https://docs.rs/rpki/latest/src/rpki/repository/aspa.rs.html#536, but
+    /// the crate misses to make some of the important objects publically available, and, ohh boy,
+    /// I am not willing to port over and maintain hundreds of lines of code just for testing...
+    pub(crate) fn add_upstreams_directly(
+        &mut self,
+        upstreams_ipv4: &HashMap<u32, HashSet<u32>>,
+        upstreams_ipv6: &HashMap<u32, HashSet<u32>>,
+    ) {
+        // update ipv4 upstream sets
+        for (key, value_set) in upstreams_ipv4.iter() {
+            for value in value_set.iter() {
+                utils::add_to_hashmap_set(&mut self.upstreams_ipv4, key, value);
+            }
+        }
+
+        // update ipv6 upstream sets
+        for (key, value_set) in upstreams_ipv6.iter() {
+            for value in value_set.iter() {
+                utils::add_to_hashmap_set(&mut self.upstreams_ipv6, key, value);
+            }
+        }
+    }
+
+    /// Reads Set of Providers for Customer ASes from a vector of AsProviderAttestation.
+    pub(crate) fn add_upstreams_from_attestations(
+        &mut self,
+        attestations: &Vec<AsProviderAttestation>,
+    ) {
         // parse attestations
         for attest in attestations {
             let customer = attest.customer_as().into_u32();
@@ -82,42 +140,37 @@ impl OpportunisticAspaPathValidator {
                 if let Some(family) = provider_as_set.afi_limit() {
                     match family {
                         AddressFamily::Ipv4 => {
-                            utils::add_to_hashmap_set(&mut upstreams_ipv4, &customer, &provider);
+                            utils::add_to_hashmap_set(
+                                &mut self.upstreams_ipv4,
+                                &customer,
+                                &provider,
+                            );
                         }
                         AddressFamily::Ipv6 => {
-                            utils::add_to_hashmap_set(&mut upstreams_ipv6, &customer, &provider);
+                            utils::add_to_hashmap_set(
+                                &mut self.upstreams_ipv6,
+                                &customer,
+                                &provider,
+                            );
                         }
                     }
                 } else {
                     // no afi_limit set, add to both.
-                    utils::add_to_hashmap_set(&mut upstreams_ipv4, &customer, &provider);
-                    utils::add_to_hashmap_set(&mut upstreams_ipv6, &customer, &provider);
+                    utils::add_to_hashmap_set(&mut self.upstreams_ipv4, &customer, &provider);
+                    utils::add_to_hashmap_set(&mut self.upstreams_ipv6, &customer, &provider);
                 }
             }
         }
+    }
 
-        // Lists of Tier 1 networks, taken from https://en.wikipedia.org/wiki/Tier_1_network
-        let tier_ones_ipv4: HashSet<u32> = HashSet::from([
-            174, 701, 1239, 1299, 2828, 2914, 3257, 3320, 3356, 3491, 5511, 6453, 6461, 6762, 6830,
-            7018, 7922, 12956,
-        ]);
-        let tier_ones_ipv6: HashSet<u32> = HashSet::from([
-            701, 1239, 1299, 2914, 3257, 3320, 3356, 3491, 5511, 6453, 6461, 6762, 6830, 7018,
-            7922, 12956,
-        ]);
-
-        // Lists of Tier 1 networks, taken from https://en.wikipedia.org/wiki/Tier_1_network
-        let route_servers_ipv4: HashSet<u32> = HashSet::new();
-        let route_servers_ipv6: HashSet<u32> = HashSet::new();
-
-        return Ok(OpportunisticAspaPathValidator {
-            upstreams_ipv4,
-            upstreams_ipv6,
-            tier_ones_ipv4,
-            tier_ones_ipv6,
-            route_servers_ipv4,
-            route_servers_ipv6,
-        });
+    /// Adds sets of route server ASNs for the validation.
+    pub(crate) fn add_route_servers(
+        &mut self,
+        route_servers_ipv4: HashSet<u32>,
+        route_servers_ipv6: HashSet<u32>,
+    ) {
+        self.route_servers_ipv4.extend(route_servers_ipv4);
+        self.route_servers_ipv6.extend(route_servers_ipv6);
     }
 
     /// infers maximum upstream sequence from origin.
@@ -309,4 +362,117 @@ pub(crate) fn get_asa_files(dir: &str) -> Result<Vec<String>, Box<dyn Error>> {
         }
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::aspa::{
+        OpportunisticAspaPathValidator, UpInfFailReason, UpInfSuccessReason,
+        UpstreamExtractionResult,
+    };
+    use crate::utils;
+    use bgpkit_parser::models::{AsPath, AsPathSegment, NetworkPrefix};
+    use bgpkit_parser::BgpElem;
+    use std::collections::{HashMap, HashSet};
+    use std::str::FromStr;
+
+    /// Sets up a simple OpportunisticAspaPathValidator object for testing.
+    fn setup_validator() -> OpportunisticAspaPathValidator {
+        // generating attestations, testing asn ranges (64496 - 64511) as defined in RFC 5398.
+        let mut upstreams_v4: HashMap<u32, HashSet<u32>> = HashMap::new();
+        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64500);
+        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64501);
+        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64504);
+        let mut upstreams_v6: HashMap<u32, HashSet<u32>> = HashMap::new();
+        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64500);
+        utils::add_to_hashmap_set(&mut upstreams_v4, &64499, &64501);
+        utils::add_to_hashmap_set(&mut upstreams_v6, &64499, &64506);
+
+        // instantiate OpportunisticAspaPathValidator
+        let mut aspa_val = OpportunisticAspaPathValidator::new();
+        aspa_val.add_upstreams_directly(&upstreams_v4, &upstreams_v6);
+        aspa_val
+    }
+
+    /// Convenience function that derives a BgpElem object from the input parameters.
+    fn elem_from_specification(segment_path: &[u32], peer_asn: u32, ipv4: bool) -> BgpElem {
+        // convert as path to correct form.
+        let path = segment_path.iter().map(|asn| (*asn).into()).collect();
+
+        // Generate default BgpElem and overwrite the important fields.
+        let mut elem: BgpElem = Default::default();
+        elem.as_path = Some(AsPath {
+            segments: vec![AsPathSegment::AsSequence(path)],
+        });
+        elem.prefix = match ipv4 {
+            true => NetworkPrefix::from_str("0.0.0.0/0").unwrap(),
+            false => NetworkPrefix::from_str("0::/0").unwrap(),
+        };
+        elem.peer_asn = peer_asn.into();
+        elem
+    }
+
+    fn assert_success(
+        aspa_val: &OpportunisticAspaPathValidator,
+        elem: &BgpElem,
+        upstream_expected: Vec<u32>,
+        reason_expected: UpInfSuccessReason,
+    ) {
+        match aspa_val.extract_max_upstream(&elem) {
+            UpstreamExtractionResult::Success(upstream, reason) => {
+                assert_eq!(
+                    upstream_expected, upstream,
+                    "Expected upstream {:?}, got upstream {:?}",
+                    upstream_expected, upstream
+                );
+                assert_eq!(
+                    reason_expected, reason,
+                    "Expected Success reason {:?}, got success reason {:?}",
+                    reason_expected, reason
+                );
+            }
+            UpstreamExtractionResult::Failure(reason) => {
+                panic!("Expected Success, got Failure with reason {:?}", reason)
+            }
+        }
+    }
+
+    fn assert_failure(
+        aspa_val: &OpportunisticAspaPathValidator,
+        elem: &BgpElem,
+        reason_expected: UpInfFailReason,
+    ) {
+        match aspa_val.extract_max_upstream(&elem) {
+            UpstreamExtractionResult::Success(upstream, reason) => panic!(
+                "Expected no upstream, got upstream {:?} with reason {:?}",
+                upstream, reason
+            ),
+            UpstreamExtractionResult::Failure(reason) => {
+                assert_eq!(
+                    reason_expected, reason,
+                    "Expected failure reason {:?}, got failure reason {:?}",
+                    reason_expected, reason
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn test_extract_max_upstream_successtierone() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        // success test
+        let elem = elem_from_specification(&[64503, 64502, 174, 64501, 64500], 64503, true);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![174, 64501, 64500],
+            UpInfSuccessReason::SuccessTierone,
+        );
+
+        // Failure test
+        let elem = elem_from_specification(&[64503, 64502, 174], 64503, true);
+        assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
 }

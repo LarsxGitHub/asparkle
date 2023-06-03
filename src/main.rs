@@ -284,7 +284,7 @@ fn bgpkit_get_ribs_size_ordered(ts: i64) -> Vec<BrokerItem> {
 fn bgpkit_get_routes(target: &BrokerItem, attestations: &Vec<AsProviderAttestation>) {
     let parser = BgpkitParser::new(target.url.as_str()).unwrap();
 
-    let aspaval = aspa::OpportunisticAspaPathValidator::new(attestations).unwrap();
+    let aspaval = aspa::OpportunisticAspaPathValidator::new();
     for (i, elem) in parser.into_elem_iter().enumerate() {
         if i == 100 {
             break;

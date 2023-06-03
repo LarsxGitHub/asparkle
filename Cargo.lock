@@ -88,6 +88,7 @@ dependencies = [
 name = "aspa-observatory"
 version = "0.1.0"
 dependencies = [
+ "bcder",
  "bgpkit-broker",
  "bgpkit-parser",
  "chrono",
@@ -131,9 +132,9 @@ checksum = "3f1e31e207a6b8fb791a38ea3105e6cb541f55e4d029902d3039a4ad07cc4105"
 
 [[package]]
 name = "bcder"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69dfb7dc0d4aee3f8c723c43553b55662badf692b541ff8e4426df75dae8da9a"
+checksum = "ab26f019795af36086f2ca879aeeaae7566bdfd2fe0821a0328d3fdd9d1da2d9"
 dependencies = [
  "bytes",
  "smallvec",
@@ -1044,18 +1045,18 @@ dependencies = [
 
 [[package]]
 name = "routecore"
-version = "0.2.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9afd872857e85411c0ba7d18dfe650fc4864b292c02cde997e86c511314fdfc3"
+checksum = "f8e2f02d8dd21010b44bf2ca4502cca2fbb2a8ddfd982a18feff149279dc236c"
 dependencies = [
  "bcder",
 ]
 
 [[package]]
 name = "rpki"
-version = "0.15.10"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93cb4a11fa739521d34d6c4213bbf75be8f2ecd438024721870731436d44ab36"
+checksum = "207f773b99ae73e14f8e8ab0f789a5892fc46548b1b79caccec8f33e2d303c40"
 dependencies = [
  "base64 0.13.1",
  "bcder",
