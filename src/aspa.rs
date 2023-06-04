@@ -1,6 +1,7 @@
 use bgpkit_parser::models::AsPathSegment;
 use bgpkit_parser::BgpElem;
 use ipnet::IpNet;
+use itertools::Itertools;
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
 use std::collections::{HashMap, HashSet};
@@ -8,6 +9,44 @@ use std::error::Error;
 use std::fs;
 
 use crate::utils;
+
+/// Witness that can either confirm or offend an ASPA Attestation
+#[derive(Debug, PartialEq)]
+pub(crate) enum AspaAttestWitness {
+    AspaAttestOffense(RampDirection, u32, u32),
+    AspaAttestConfirmation(RampDirection, u32, u32),
+}
+
+/// Offense against an ASPA attestation
+#[derive(Debug, PartialEq)]
+pub(crate) struct AspaAttestOffense {
+    dir: RampDirection,
+    cas: u32,
+    pas_off: u32,
+}
+
+/// Confirmation for an ASPA attestation
+#[derive(Debug, PartialEq)]
+pub(crate) struct AspaAttestConfirmation {
+    dir: RampDirection,
+    cas: u32,
+    pas: u32,
+}
+
+/// whether the Witness was derived from the up or downstream.
+#[derive(Debug, PartialEq)]
+pub(crate) enum RampDirection {
+    Up,
+    Down,
+}
+
+/// Per-Route ASPA validation witnesses.
+#[derive(Debug, PartialEq)]
+pub(crate) struct AspaValidatedRoute {
+    pfx: ipnet::IpNet,
+    path: Vec<u32>,
+    witnesses: Vec<AspaAttestWitness>,
+}
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum HopCheckOutcome {
@@ -18,10 +57,10 @@ pub(crate) enum HopCheckOutcome {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum OpportunisticAspaValidationState {
-    Valid,
+    Valid(AspaValidatedRoute),
     InvalidAsset,
     InvalidPeerasn,
-    InvalidAspa,
+    InvalidAspa(AspaValidatedRoute),
     Unknown,
     NoOpportunity,
     Insufficient,
@@ -356,19 +395,19 @@ impl OpportunisticAspaPathValidator {
 
     /// performs the hop(AS(i), AS(j), AFI) function from figure 1 in
     /// https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-aspa-verification-14
-    fn hop_check(&self, as_i: u32, as_j: u32, is_ipv6: bool) -> HopCheckOutcome {
+    fn hop_check(&self, cas: &u32, pas: &u32, is_ipv6: bool) -> HopCheckOutcome {
         let upstreams = match is_ipv6 {
             true => &self.upstreams_ipv6,
             false => &self.upstreams_ipv4,
         };
 
         // has no attestation
-        if !upstreams.contains_key(&as_i) {
+        if !upstreams.contains_key(cas) {
             return HopCheckOutcome::NoAttestation;
         }
 
         // has a matching attestation
-        if upstreams.get(&as_i).unwrap().contains(&as_j) {
+        if upstreams.get(cas).unwrap().contains(pas) {
             return HopCheckOutcome::ProviderPlus;
         }
 
@@ -377,14 +416,16 @@ impl OpportunisticAspaPathValidator {
     }
 
     pub(crate) fn validate(&self, elem: BgpElem) -> OpportunisticAspaValidationState {
-        // Todo: run opportunistic validation
-
         let mut downstream: Vec<u32> = Vec::new();
         let mut upstream: Vec<u32> = Vec::new();
+        let mut reason: UpInfSuccessReason;
+
+        // extract down and upstreams (either might be empty).
         match self.extract_up_and_down_stream(&elem) {
-            UpstreamExtractionResult::Success(downstream_inf, upstream_inf, reason) => {
+            UpstreamExtractionResult::Success(downstream_inf, upstream_inf, reason_inf) => {
                 downstream = downstream_inf;
                 upstream = upstream_inf;
+                reason = reason_inf;
             }
             UpstreamExtractionResult::Failure(reason) => match reason {
                 UpInfFailReason::FailureAsset => {
@@ -394,12 +435,80 @@ impl OpportunisticAspaPathValidator {
                     return OpportunisticAspaValidationState::NoOpportunity
                 }
                 // please note that the Insufficient outcome actually might represent a "valid"
-                // outcome according to Algorithm for Upstream Paths Rule 3. However, for the
+                // outcome according to Algorithm for Upstream Paths (Rule 3). However, for the
                 // dashboard do not really care about finding valid paths, but rather offending AS
                 // hops, so we can ignore this inaccuracy.
                 _ => return OpportunisticAspaValidationState::Insufficient,
             },
         }
+
+        // double unwrap fine as we were able to extract up and down streams previously.
+        let is_ipv6 = matches!(elem.prefix.prefix, IpNet::V6(_));
+        let mut witnesses: Vec<AspaAttestWitness> = Vec::new();
+        let mut has_offense = false;
+
+        // validate downstream
+        for (cas, pas) in downstream.iter().tuple_windows() {
+            match self.hop_check(cas, pas, is_ipv6) {
+                HopCheckOutcome::NoAttestation => continue,
+                HopCheckOutcome::ProviderPlus => {
+                    witnesses.push(AspaAttestWitness::AspaAttestConfirmation(
+                        RampDirection::Down,
+                        *cas,
+                        *pas,
+                    ));
+                }
+                HopCheckOutcome::NotProviderPlus => {
+                    has_offense = true;
+                    witnesses.push(AspaAttestWitness::AspaAttestOffense(
+                        RampDirection::Down,
+                        *cas,
+                        *pas,
+                    ));
+                }
+            }
+        }
+
+        // validate upstream
+        for (pas, cas) in upstream.iter().tuple_windows() {
+            match self.hop_check(cas, pas, is_ipv6) {
+                HopCheckOutcome::NoAttestation => continue,
+                HopCheckOutcome::ProviderPlus => {
+                    witnesses.push(AspaAttestWitness::AspaAttestConfirmation(
+                        RampDirection::Down,
+                        *cas,
+                        *pas,
+                    ));
+                }
+                HopCheckOutcome::NotProviderPlus => {
+                    has_offense = true;
+                    witnesses.push(AspaAttestWitness::AspaAttestOffense(
+                        RampDirection::Down,
+                        *cas,
+                        *pas,
+                    ));
+                }
+            }
+        }
+
+        // collected pieces together.
+        let val_route = AspaValidatedRoute {
+            pfx: elem.prefix.prefix,
+            path: elem.as_path.unwrap().to_u32_vec().unwrap(),
+            witnesses,
+        };
+
+        // does this route have a tuple that offends an aspa attest?
+        if has_offense {
+            return OpportunisticAspaValidationState::InvalidAspa(val_route);
+        }
+
+        // if no offenses, are there any confirmed attests?
+        if !val_route.witnesses.is_empty() {
+            return OpportunisticAspaValidationState::Valid(val_route);
+        }
+
+        // if not, we can not really say anything.
         OpportunisticAspaValidationState::Unknown
     }
 }
