@@ -59,7 +59,7 @@ pub(crate) enum HopCheckOutcome {
 pub(crate) enum OpportunisticAspaValidationState {
     Valid(AspaValidatedRoute),
     InvalidAsset,
-    InvalidPeerasn,
+    // InvalidPeerasn, would delete all RC peers that are RSes.
     InvalidAspa(AspaValidatedRoute),
     Unknown,
     NoOpportunity,
@@ -415,7 +415,10 @@ impl OpportunisticAspaPathValidator {
         HopCheckOutcome::NotProviderPlus
     }
 
-    pub(crate) fn validate(&self, elem: BgpElem) -> OpportunisticAspaValidationState {
+    pub(crate) fn validate_opportunistically(
+        &self,
+        elem: &BgpElem,
+    ) -> OpportunisticAspaValidationState {
         let mut downstream: Vec<u32> = Vec::new();
         let mut upstream: Vec<u32> = Vec::new();
         let mut reason: UpInfSuccessReason;
@@ -475,7 +478,7 @@ impl OpportunisticAspaPathValidator {
                 HopCheckOutcome::NoAttestation => continue,
                 HopCheckOutcome::ProviderPlus => {
                     witnesses.push(AspaAttestWitness::AspaAttestConfirmation(
-                        RampDirection::Down,
+                        RampDirection::Up,
                         *cas,
                         *pas,
                     ));
@@ -483,7 +486,7 @@ impl OpportunisticAspaPathValidator {
                 HopCheckOutcome::NotProviderPlus => {
                     has_offense = true;
                     witnesses.push(AspaAttestWitness::AspaAttestOffense(
-                        RampDirection::Down,
+                        RampDirection::Up,
                         *cas,
                         *pas,
                     ));
@@ -494,7 +497,7 @@ impl OpportunisticAspaPathValidator {
         // collected pieces together.
         let val_route = AspaValidatedRoute {
             pfx: elem.prefix.prefix,
-            path: elem.as_path.unwrap().to_u32_vec().unwrap(),
+            path: elem.as_path.as_ref().unwrap().to_u32_vec().unwrap(),
             witnesses,
         };
 
@@ -553,7 +556,8 @@ pub(crate) fn get_asa_files(dir: &str) -> Result<Vec<String>, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use crate::aspa::{
-        OpportunisticAspaPathValidator, UpInfFailReason, UpInfSuccessReason,
+        AspaAttestWitness, AspaValidatedRoute, OpportunisticAspaPathValidator,
+        OpportunisticAspaValidationState, RampDirection, UpInfFailReason, UpInfSuccessReason,
         UpstreamExtractionResult,
     };
     use crate::utils;
@@ -663,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_success_tierone() {
+    fn test_extract_up_and_down_stream_success_tierone() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -693,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_success_routeserver() {
+    fn test_extract_up_and_down_stream_success_routeserver() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -713,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_success_tieronepeer() {
+    fn test_extract_up_and_down_stream_success_tieronepeer() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -759,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_success_rcptierone() {
+    fn test_extract_up_and_down_stream_success_rcptierone() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -779,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_success_rcprouteserver() {
+    fn test_extract_up_and_down_stream_success_rcprouteserver() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -809,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_success_otc() {
+    fn test_extract_up_and_down_stream_success_otc() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -833,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_success_attestation() {
+    fn test_extract_up_and_down_stream_success_attestation() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -873,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_failure_asset() {
+    fn test_extract_up_and_down_stream_failure_asset() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -895,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_failure_none() {
+    fn test_extract_up_and_down_stream_failure_none() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -905,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_failure_empty() {
+    fn test_extract_up_and_down_stream_failure_empty() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -916,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_failure_uncertain() {
+    fn test_extract_up_and_down_stream_failure_uncertain() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -926,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_max_upstream_failure_insufficient() {
+    fn test_extract_up_and_down_stream_failure_insufficient() {
         // provide setup
         let aspa_val = setup_validator();
 
@@ -941,5 +945,161 @@ mod tests {
         // Failure test tier one
         let elem = elem_from_specification(&[64502, 64510], 64502, true, None);
         assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
+    }
+
+    fn assert_no_witnesses(
+        aspa_val: &OpportunisticAspaPathValidator,
+        elem: &BgpElem,
+        state_expected: OpportunisticAspaValidationState,
+    ) {
+        match aspa_val.validate_opportunistically(elem) {
+            OpportunisticAspaValidationState::Valid(_)
+            | OpportunisticAspaValidationState::InvalidAspa(_) => {
+                panic!("Expected validation state without witnesses.")
+            }
+
+            other => assert_eq!(
+                state_expected, other,
+                "Expected state {:?} but got state {:?}",
+                state_expected, other
+            ),
+        }
+    }
+
+    fn assert_witnesses(
+        aspa_val: &OpportunisticAspaPathValidator,
+        elem: &BgpElem,
+        outcome_expected: &AspaValidatedRoute,
+        valid_expected: bool,
+    ) {
+        match aspa_val.validate_opportunistically(elem) {
+            OpportunisticAspaValidationState::Valid(outcome_inferred) => {
+                if valid_expected {
+                    assert_eq!(
+                        *outcome_expected, outcome_inferred,
+                        "Expected AspaValidatedRoute {:?}, got {:?}",
+                        *outcome_expected, outcome_inferred
+                    );
+                } else {
+                    panic!("Expected OpportunisticAspaValidationState::InvalidAspa but got OpportunisticAspaValidationState::Valid.");
+                }
+            }
+            OpportunisticAspaValidationState::InvalidAspa(outcome_inferred) => {
+                if !valid_expected {
+                    assert_eq!(
+                        *outcome_expected, outcome_inferred,
+                        "Expected AspaValidatedRoute {:?}, got {:?}",
+                        *outcome_expected, outcome_inferred
+                    );
+                } else {
+                    panic!("Expected OpportunisticAspaValidationState::Valid but got OpportunisticAspaValidationState::InvalidAspa.");
+                }
+            }
+            other => panic!("Expected state with witnesses, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_opportunistically_valid() {
+        // provide setup
+        let aspa_val = setup_validator();
+        let elem = elem_from_specification(&[64500, 64499], 64500, true, Some(64500));
+
+        let witnesses = vec![AspaAttestWitness::AspaAttestConfirmation(
+            RampDirection::Up,
+            64499,
+            64500,
+        )];
+
+        // collected pieces together.
+        let val_route = AspaValidatedRoute {
+            pfx: elem.prefix.prefix,
+            path: elem.as_path.as_ref().unwrap().to_u32_vec().unwrap(),
+            witnesses,
+        };
+
+        assert_witnesses(&aspa_val, &elem, &val_route, true)
+    }
+
+    #[test]
+    fn test_validate_opportunistically_invalid_aspa() {
+        // provide setup
+        let aspa_val = setup_validator();
+        let elem = elem_from_specification(&[64509, 64499], 64509, true, Some(64509));
+
+        let witnesses = vec![AspaAttestWitness::AspaAttestOffense(
+            RampDirection::Up,
+            64499,
+            64509,
+        )];
+
+        // collected pieces together.
+        let val_route = AspaValidatedRoute {
+            pfx: elem.prefix.prefix,
+            path: elem.as_path.as_ref().unwrap().to_u32_vec().unwrap(),
+            witnesses,
+        };
+
+        assert_witnesses(&aspa_val, &elem, &val_route, false)
+    }
+
+    #[test]
+    fn test_validate_opportunistically_invalid_asset() {
+        // provide setup
+        let aspa_val = setup_validator();
+        // Generate an BgpElem with AS_Set in path
+        let mut elem: BgpElem = Default::default();
+        elem.as_path = Some(AsPath {
+            segments: vec![
+                AsPathSegment::AsSet(vec![64501.into()]),
+                AsPathSegment::AsSequence(
+                    [64505, 64506, 64499]
+                        .iter()
+                        .map(|asn| (*asn).into())
+                        .collect(),
+                ),
+            ],
+        });
+        elem.peer_asn = 64505.into();
+        assert_no_witnesses(
+            &aspa_val,
+            &elem,
+            OpportunisticAspaValidationState::InvalidAsset,
+        )
+    }
+
+    #[test]
+    fn test_validate_opportunistically_unknown() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        let elem = elem_from_specification(&[64503, 701, 64501], 64503, true, None);
+        assert_no_witnesses(&aspa_val, &elem, OpportunisticAspaValidationState::Unknown)
+    }
+
+    #[test]
+    fn test_validate_opportunistically_noopportunity() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        let elem = elem_from_specification(&[64503, 64502, 64501], 64503, true, None);
+        assert_no_witnesses(
+            &aspa_val,
+            &elem,
+            OpportunisticAspaValidationState::NoOpportunity,
+        )
+    }
+
+    #[test]
+    fn test_validate_opportunistically_insufficient() {
+        // provide setup
+        let aspa_val = setup_validator();
+
+        let elem = elem_from_specification(&[64504], 64504, true, Some(64504));
+        assert_no_witnesses(
+            &aspa_val,
+            &elem,
+            OpportunisticAspaValidationState::Insufficient,
+        )
     }
 }
