@@ -10,6 +10,13 @@ use std::fs;
 use crate::utils;
 
 #[derive(Debug, PartialEq)]
+pub(crate) enum HopCheckOutcome {
+    NoAttestation,
+    ProviderPlus,
+    NotProviderPlus,
+}
+
+#[derive(Debug, PartialEq)]
 pub(crate) enum OpportunisticAspaValidationState {
     Valid,
     InvalidAsset,
@@ -17,6 +24,7 @@ pub(crate) enum OpportunisticAspaValidationState {
     InvalidAspa,
     Unknown,
     NoOpportunity,
+    Insufficient,
 }
 
 #[derive(Debug, PartialEq)]
@@ -41,7 +49,7 @@ pub(crate) enum UpInfFailReason {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum UpstreamExtractionResult {
-    Success(Vec<u32>, UpInfSuccessReason),
+    Success(Vec<u32>, Vec<u32>, UpInfSuccessReason),
     Failure(UpInfFailReason),
 }
 
@@ -174,7 +182,7 @@ impl OpportunisticAspaPathValidator {
     }
 
     /// infers maximum upstream sequence from origin.
-    pub(crate) fn extract_max_upstream(&self, elem: &BgpElem) -> UpstreamExtractionResult {
+    pub(crate) fn extract_up_and_down_stream(&self, elem: &BgpElem) -> UpstreamExtractionResult {
         // if no path is included, we can't infer upstream.
         if elem.as_path.is_none() {
             return UpstreamExtractionResult::Failure(UpInfFailReason::FailureNone);
@@ -221,6 +229,7 @@ impl OpportunisticAspaPathValidator {
         if tier_ones.contains(&elem.peer_asn.asn) {
             if path_dense.len() > 1 {
                 return UpstreamExtractionResult::Success(
+                    Vec::from(path_dense.get(..1).unwrap()),
                     path_dense,
                     UpInfSuccessReason::SuccessRcpTierone,
                 );
@@ -233,6 +242,7 @@ impl OpportunisticAspaPathValidator {
         if (route_servers.contains(&elem.peer_asn.asn)) | (path_dense[0] != elem.peer_asn.asn) {
             if path_dense.len() > 1 {
                 return UpstreamExtractionResult::Success(
+                    Vec::from(path_dense.get(..1).unwrap()),
                     path_dense,
                     UpInfSuccessReason::SuccessRcpRouteserver,
                 );
@@ -247,6 +257,7 @@ impl OpportunisticAspaPathValidator {
             if let Some(idx) = path_dense.iter().position(|&asn| asn == top_asn) {
                 if path_dense.len() > 1 {
                     return UpstreamExtractionResult::Success(
+                        Vec::from(path_dense.get(..idx + 1).unwrap()),
                         Vec::from(path_dense.get(idx..).unwrap()),
                         UpInfSuccessReason::SuccessOtc,
                     );
@@ -270,21 +281,24 @@ impl OpportunisticAspaPathValidator {
                     }
                 }
                 // unwrap safe as it returns at least itself.
+                let downstream = path_dense.get(..start_idx + 1).unwrap();
                 let upstream = path_dense.get(start_idx..).unwrap();
 
                 // path is too short for aspa validation ...
-                if upstream.len() == 1 {
+                if (upstream.len() <= 1) & (downstream.len() <= 1) {
                     return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
                 }
 
                 // make sure to report the correct reasoning.
                 if idx == start_idx {
                     return UpstreamExtractionResult::Success(
+                        Vec::from(downstream),
                         Vec::from(upstream),
                         UpInfSuccessReason::SuccessTierone,
                     );
                 } else {
                     return UpstreamExtractionResult::Success(
+                        Vec::from(downstream),
                         Vec::from(upstream),
                         UpInfSuccessReason::SuccessTieronePeer,
                     );
@@ -294,11 +308,13 @@ impl OpportunisticAspaPathValidator {
             // 5. we hit a non-transparent route server (which might be part of an aspa attestation.)
             if route_servers.contains(&asn) {
                 // unwrap safe as it returns at least itself.
+                let downstream = path_dense.get(..idx + 1).unwrap();
                 let upstream = path_dense.get(idx..).unwrap();
                 if upstream.len() == 1 {
                     return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
                 }
                 return UpstreamExtractionResult::Success(
+                    Vec::from(downstream),
                     Vec::from(upstream),
                     UpInfSuccessReason::SuccessRouteserver,
                 );
@@ -319,10 +335,16 @@ impl OpportunisticAspaPathValidator {
         }
 
         // There was a valid upstream somewhere in the path.
+        // Please note: the downstream here will always be empty as we can not be sure that we
+        // actually reached the apex of the path (it might be that the actual apex is higher yet the
+        // cas of the provider at the apex did not configure aspa attestations). Hence, to not
+        // generate mis-inferences later on, we have to conservatively return an empty downstream.
         if let Some(idx) = last_valid_upstream_idx {
             // unwrap safe, contains at least two ASNs.
+            let downstream = path_dense.get(..idx + 1).unwrap();
             let upstream = path_dense.get(idx..).unwrap();
             return UpstreamExtractionResult::Success(
+                Vec::new(),
                 Vec::from(upstream),
                 UpInfSuccessReason::SuccessAttestation,
             );
@@ -332,9 +354,52 @@ impl OpportunisticAspaPathValidator {
         UpstreamExtractionResult::Failure(UpInfFailReason::FailureUncertain)
     }
 
+    /// performs the hop(AS(i), AS(j), AFI) function from figure 1 in
+    /// https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-aspa-verification-14
+    fn hop_check(&self, as_i: u32, as_j: u32, is_ipv6: bool) -> HopCheckOutcome {
+        let upstreams = match is_ipv6 {
+            true => &self.upstreams_ipv6,
+            false => &self.upstreams_ipv4,
+        };
+
+        // has no attestation
+        if !upstreams.contains_key(&as_i) {
+            return HopCheckOutcome::NoAttestation;
+        }
+
+        // has a matching attestation
+        if upstreams.get(&as_i).unwrap().contains(&as_j) {
+            return HopCheckOutcome::ProviderPlus;
+        }
+
+        // CAS has attestations, yet none of them matches.
+        HopCheckOutcome::NotProviderPlus
+    }
+
     pub(crate) fn validate(&self, elem: BgpElem) -> OpportunisticAspaValidationState {
         // Todo: run opportunistic validation
 
+        let mut downstream: Vec<u32> = Vec::new();
+        let mut upstream: Vec<u32> = Vec::new();
+        match self.extract_up_and_down_stream(&elem) {
+            UpstreamExtractionResult::Success(downstream_inf, upstream_inf, reason) => {
+                downstream = downstream_inf;
+                upstream = upstream_inf;
+            }
+            UpstreamExtractionResult::Failure(reason) => match reason {
+                UpInfFailReason::FailureAsset => {
+                    return OpportunisticAspaValidationState::InvalidAsset
+                }
+                UpInfFailReason::FailureUncertain => {
+                    return OpportunisticAspaValidationState::NoOpportunity
+                }
+                // please note that the Insufficient outcome actually might represent a "valid"
+                // outcome according to Algorithm for Upstream Paths Rule 3. However, for the
+                // dashboard do not really care about finding valid paths, but rather offending AS
+                // hops, so we can ignore this inaccuracy.
+                _ => return OpportunisticAspaValidationState::Insufficient,
+            },
+        }
         OpportunisticAspaValidationState::Unknown
     }
 }
@@ -440,11 +505,17 @@ mod tests {
     fn assert_success(
         aspa_val: &OpportunisticAspaPathValidator,
         elem: &BgpElem,
+        downstream_expected: Vec<u32>,
         upstream_expected: Vec<u32>,
         reason_expected: UpInfSuccessReason,
     ) {
-        match aspa_val.extract_max_upstream(&elem) {
-            UpstreamExtractionResult::Success(upstream, reason) => {
+        match aspa_val.extract_up_and_down_stream(&elem) {
+            UpstreamExtractionResult::Success(downstream, upstream, reason) => {
+                assert_eq!(
+                    downstream_expected, downstream,
+                    "Expected downstream {:?}, got downstream {:?}",
+                    downstream_expected, downstream
+                );
                 assert_eq!(
                     upstream_expected, upstream,
                     "Expected upstream {:?}, got upstream {:?}",
@@ -467,10 +538,10 @@ mod tests {
         elem: &BgpElem,
         reason_expected: UpInfFailReason,
     ) {
-        match aspa_val.extract_max_upstream(&elem) {
-            UpstreamExtractionResult::Success(upstream, reason) => panic!(
-                "Expected no upstream, got upstream {:?} with reason {:?}",
-                upstream, reason
+        match aspa_val.extract_up_and_down_stream(&elem) {
+            UpstreamExtractionResult::Success(downstream, upstream, reason) => panic!(
+                "Expected no upstream, got downstream {:?} and upstream {:?} with reason {:?}",
+                downstream, upstream, reason
             ),
             UpstreamExtractionResult::Failure(reason) => {
                 assert_eq!(
@@ -492,12 +563,23 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503, 64502, 174],
             vec![174, 64501, 64500],
             UpInfSuccessReason::SuccessTierone,
         );
 
         // Failure test
         let elem = elem_from_specification(&[64503, 64502, 174], 64503, true, None);
+        assert_success(
+            &aspa_val,
+            &elem,
+            vec![64503, 64502, 174],
+            vec![174],
+            UpInfSuccessReason::SuccessTierone,
+        );
+
+        // Failure test
+        let elem = elem_from_specification(&[174], 174, true, None);
         assert_failure(&aspa_val, &elem, UpInfFailReason::FailureInsufficient);
     }
 
@@ -511,6 +593,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503, 64510],
             vec![64510, 64502, 64501, 64500],
             UpInfSuccessReason::SuccessRouteserver,
         );
@@ -530,6 +613,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503, 64510],
             vec![64510, 701, 64501, 64500],
             UpInfSuccessReason::SuccessTieronePeer,
         );
@@ -539,6 +623,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503, 64511],
             vec![64511, 701, 64501, 64500],
             UpInfSuccessReason::SuccessTieronePeer,
         );
@@ -548,6 +633,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503, 174],
             vec![174, 701, 64501, 64500],
             UpInfSuccessReason::SuccessTieronePeer,
         );
@@ -557,6 +643,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503, 174, 701],
             vec![701, 64501, 64500],
             UpInfSuccessReason::SuccessTierone,
         );
@@ -572,6 +659,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![701],
             vec![701, 64503, 64502, 64501, 64500],
             UpInfSuccessReason::SuccessRcpTierone,
         );
@@ -591,6 +679,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64510],
             vec![64510, 64503, 64502, 64501, 64500],
             UpInfSuccessReason::SuccessRcpRouteserver,
         );
@@ -600,6 +689,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503],
             vec![64503, 64502, 64501, 64500],
             UpInfSuccessReason::SuccessRcpRouteserver,
         );
@@ -619,6 +709,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![64503, 64502],
             vec![64502, 64501, 64500],
             UpInfSuccessReason::SuccessOtc,
         );
@@ -642,6 +733,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![],
             vec![64500, 64499],
             UpInfSuccessReason::SuccessAttestation,
         );
@@ -651,6 +743,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![],
             vec![64509, 64500, 64499],
             UpInfSuccessReason::SuccessAttestation,
         );
@@ -660,6 +753,7 @@ mod tests {
         assert_success(
             &aspa_val,
             &elem,
+            vec![],
             vec![64506, 64499],
             UpInfSuccessReason::SuccessAttestation,
         );

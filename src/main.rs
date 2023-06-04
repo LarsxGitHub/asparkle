@@ -289,15 +289,6 @@ fn bgpkit_get_routes(target: &BrokerItem, attestations: &Vec<AsProviderAttestati
         if i == 100 {
             break;
         }
-
-        match aspaval.extract_max_upstream(&elem) {
-            UpstreamExtractionResult::Success(upstream, reason) => {
-                println!("inferred upstream {:?} based on {:?}", upstream, reason);
-            }
-            UpstreamExtractionResult::Failure(reason) => {
-                println!("Failed to infer upstream based on {:?}", reason);
-            }
-        }
     }
 }
 fn main() {
