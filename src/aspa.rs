@@ -43,9 +43,9 @@ pub(crate) enum RampDirection {
 /// Per-Route ASPA validation witnesses.
 #[derive(Debug, PartialEq)]
 pub(crate) struct AspaValidatedRoute {
-    pfx: ipnet::IpNet,
-    path: Vec<u32>,
-    witnesses: Vec<AspaAttestWitness>,
+    pub pfx: ipnet::IpNet,
+    pub path: Vec<u32>,
+    pub witnesses: Vec<AspaAttestWitness>,
 }
 
 #[derive(Debug, PartialEq)]

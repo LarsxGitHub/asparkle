@@ -12,6 +12,7 @@ use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::Display;
+use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
 
@@ -20,6 +21,7 @@ const PERCENTILE_LIST: [f64; 7] = [0.05, 0.10, 0.25, 0.5, 0.75, 0.90, 0.95];
 
 mod aspa;
 mod peeringdb;
+mod pipeline;
 mod utils;
 
 #[macro_export]
@@ -37,13 +39,13 @@ fn parse_input_ts(cli_args: &ArgMatches) -> i64 {
     match cli_args.get_one::<String>("date") {
         Some(d) => date_str = d,
         None => {
-            exit_msg!("Required parameter 'date' was not provided.");
+            exit_msg!("ERROR: Required parameter 'date' was not provided.");
         }
     };
 
     // check if date is malformatted.
     if let Err(e) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-        exit_msg!("Date is incorrectly formatted, see: {}", e);
+        exit_msg!("ERROR: Date is incorrectly formatted, see: {}", e);
     }
 
     // extend date to start-of-day DateTimeit push origin
@@ -53,17 +55,110 @@ fn parse_input_ts(cli_args: &ArgMatches) -> i64 {
         Ok(dt) => date = dt,
         Err(e) => {
             // this should never happen
-            exit_msg!("NaiveDate to DateTime conversion failed, see: {}", e);
+            exit_msg!("ERROR: NaiveDate to DateTime conversion failed, see: {}", e);
         }
     }
 
     date.timestamp()
 }
 
+fn parse_pdb_file(cli_args: &ArgMatches) -> String {
+    // get path from cli args
+    let pdb_file = cli_args
+        .get_one::<String>("pdb_dump")
+        .expect("Required parameter 'aspa_dump' was not provided.");
+
+    // canonicalize the path
+    let pdb_file_canon =
+        fs::canonicalize(pdb_file).expect(&format!("Unable to canonicalize path {:?}", pdb_file));
+
+    // check whether path is a file
+    if !PathBuf::from(&pdb_file_canon).is_file() {
+        exit_msg!(
+            "ERROR: Required parameter 'pdb_dump' was set to {}, which is not a file.",
+            pdb_file
+        );
+    }
+
+    // check that extension is .json
+    if !pdb_file.ends_with(".json") {
+        exit_msg!(
+            "ERROR: Required parameter 'pdb_dump' was set to {}, which does not have a .json suffix.",
+            pdb_file
+        );
+    }
+
+    pdb_file_canon
+        .into_os_string()
+        .into_string()
+        .expect(&format!(
+            "Unable to get os string from aspa_dir {}",
+            pdb_file
+        ))
+}
+
+fn parse_aspa_dir(cli_args: &ArgMatches) -> String {
+    // get path from cli args
+    let aspa_dir = cli_args
+        .get_one::<String>("aspa_dir")
+        .expect("Required parameter 'aspa_dir' was not provided.");
+
+    // canonicalize the path
+    let aspa_dir_canon =
+        fs::canonicalize(aspa_dir).expect(&format!("Unable to canonicalize path {:?}", aspa_dir));
+
+    // check whether path is a directory
+    if !PathBuf::from(&aspa_dir_canon).is_dir() {
+        exit_msg!(
+            "ERROR: Required parameter 'aspa_dir' was set to {}, which is not a directory.",
+            aspa_dir
+        );
+    }
+
+    let mut has_some_asa_file = false;
+    for entry in fs::read_dir(&aspa_dir_canon).expect(&format!(
+        "Unable to read contents of aspa_dir directory {}",
+        aspa_dir
+    )) {
+        let link = entry
+            .expect(&format!(
+                "Unable to obtain path for spme file in aspa_dir ({}).",
+                aspa_dir
+            ))
+            .path()
+            .into_os_string()
+            .into_string()
+            .expect(&format!(
+                "Unable to obtain os string for some file in aspa_dir ({}).",
+                aspa_dir
+            ));
+        // ensure it's an .asa file, then append to vector.
+        if link.ends_with(".asa") {
+            has_some_asa_file = true;
+            break;
+        }
+    }
+
+    if !has_some_asa_file {
+        exit_msg!(
+            "ERROR: Can't find any *.asa files in aspa_dir ({})",
+            aspa_dir
+        );
+    }
+
+    aspa_dir_canon
+        .into_os_string()
+        .into_string()
+        .expect(&format!(
+            "Unable to get os string from aspa_dir {}",
+            aspa_dir
+        ))
+}
+
 /// Gets CLI parameters passed to the binary
 fn get_cli_parameters() -> ArgMatches {
     clap::Command::new("asparkle")
-        .about("Deployment and compliance statistic for ASPA records at your fingertips. ")
+        .about("Deployment and compliance statistic for ASPA records at your fingertips.")
         .author("Lars Prehn")
         .version("0.1.0")
         // Logging settings
@@ -74,6 +169,22 @@ fn get_cli_parameters() -> ArgMatches {
                 .required(true)
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
                 .help("The date for which you want to calculate statistics."),
+        )
+        .arg(
+            Arg::new("aspa_dir")
+                .short('a')
+                .long("aspa_dir")
+                .required(true)
+                .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                .help("the path to a directory containing .asa aspa files."),
+        )
+        .arg(
+            Arg::new("pdb_dump")
+                .short('p')
+                .long("pdb_dump")
+                .required(true)
+                .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                .help("the path to a PeeringDB Json dump file."),
         )
         .get_matches()
 }
@@ -269,32 +380,13 @@ fn derive_attestation_statistics(attestations: &Vec<AsProviderAttestation>) {
     );
 }
 
-fn bgpkit_get_ribs_size_ordered(ts: i64) -> Vec<BrokerItem> {
-    let broker = BgpkitBroker::new()
-        .ts_start(&ts.to_string())
-        .ts_end(&ts.to_string())
-        .data_type("rib");
-
-    broker
-        .into_iter()
-        .sorted_by_key(|item| -item.rough_size)
-        .collect()
-}
-
-fn bgpkit_get_routes(target: &BrokerItem, attestations: &Vec<AsProviderAttestation>) {
-    let parser = BgpkitParser::new(target.url.as_str()).unwrap();
-
-    let aspaval = aspa::OpportunisticAspaPathValidator::new();
-    for (i, elem) in parser.into_elem_iter().enumerate() {
-        if i == 100 {
-            break;
-        }
-    }
-}
 fn main() {
     let cli_params = get_cli_parameters();
     let start_ts = parse_input_ts(&cli_params);
+    let aspa_dir = parse_aspa_dir(&cli_params);
+    let pdb_file = parse_pdb_file(&cli_params);
 
+    /**
     let aspa_files = aspa::get_asa_files("./data/asa_samples/").unwrap();
     let attestations: Vec<AsProviderAttestation> = aspa::read_aspa_records(&aspa_files).unwrap();
     let rib_urls = bgpkit_get_ribs_size_ordered(start_ts);
@@ -315,5 +407,7 @@ fn main() {
         route_servers_v4.len(),
         route_servers_v6.len()
     )
+    **/
+    pipeline::run_pipeline(start_ts);
     // derive_attestation_statistics(&attestations);
 }
