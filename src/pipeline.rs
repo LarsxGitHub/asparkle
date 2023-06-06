@@ -1,10 +1,13 @@
 use crate::aspa::{
     AspaValidatedRoute, OpportunisticAspaPathValidator, OpportunisticAspaValidationState,
 };
+use crate::peeringdb;
+use crate::{aspa, Config};
 use bgpkit_broker::{BgpkitBroker, BrokerItem};
 use bgpkit_parser::BgpkitParser;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use itertools::Itertools;
+use std::collections::HashSet;
 use std::thread;
 use threadpool::ThreadPool;
 
@@ -35,44 +38,62 @@ fn process_collector(ch_out: Sender<AspaValidatedRoute>, target: BrokerItem) {
     }
 }
 
-fn run_consumer(ch_in: Receiver<AspaValidatedRoute>) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        println!("CONSUMER STARTED");
-        let mut count = 0;
-        loop {
-            println!("In loop");
-            if let Ok(val_route) = ch_in.recv() {
-                count += val_route.witnesses.len();
-            } else {
-                break;
-            }
+fn run_consumer(ch_in: Receiver<AspaValidatedRoute>, pool: &ThreadPool, _config: &Config) {
+    println!("CONSUMER STARTED");
+    let mut count = 0;
+    loop {
+        if let Ok(val_route) = ch_in.recv() {
+            println!("{:?}", val_route);
+            count += val_route.witnesses.len();
+        } else {
+            break;
         }
-
-        println!("{}", count);
-    })
+    }
+    pool.join();
+    println!("{}", count);
 }
 
-pub(crate) fn run_pipeline(rib_ts: i64) {
+pub(crate) fn run_pipeline(rib_ts: i64, aspa_dir: &str, pdb_file_path: &str, config: &Config) {
+    // load route servers from PeeringDB file.
+    let mut router_servers_ipv4: HashSet<u32> = HashSet::new();
+    let mut router_servers_ipv6: HashSet<u32> = HashSet::new();
+    peeringdb::load_routeservers_from_dump(
+        pdb_file_path,
+        &mut router_servers_ipv4,
+        &mut router_servers_ipv6,
+    );
+
+    // load attestations
+    let asa_files =
+        aspa::get_asa_files(aspa_dir).expect("Unable to obtain asa files from aspa_dir.");
+    let attests = aspa::read_aspa_records(&asa_files).expect("Unable to read asa file.");
+
+    // get broker items at rib ts
     let broker_items = bgpkit_get_ribs_size_ordered(rib_ts);
-    let pool = ThreadPool::new(10);
+
+    // instanciate a worker pool and channels for communication.
+    let pool = ThreadPool::new(config.pipeline_num_bgpkit_workers as usize);
     let (ch_out, ch_in) = unbounded();
 
-    let consumer = run_consumer(ch_in);
+    //set up validator
+    let mut aspa_val: OpportunisticAspaPathValidator = OpportunisticAspaPathValidator::new();
+    aspa_val.add_route_servers(&router_servers_ipv4, &router_servers_ipv6);
+    aspa_val.add_upstreams_from_attestations(&attests);
+
     for target in broker_items {
         let ch_out_cl = ch_out.clone();
+        let aspa_val_cl = aspa_val.clone();
         pool.execute(move || {
-            //println!("Starting item {:?}", &target);
-            let aspa_val: OpportunisticAspaPathValidator = OpportunisticAspaPathValidator::new();
             let parser = BgpkitParser::new(target.url.as_str()).unwrap();
             for (i, elem) in parser.into_elem_iter().enumerate() {
-                match aspa_val.validate_opportunistically(&elem) {
+                match aspa_val_cl.validate_opportunistically(&elem) {
                     OpportunisticAspaValidationState::InvalidAspa(val_route)
                     | OpportunisticAspaValidationState::Valid(val_route) => {
                         ch_out_cl.send(val_route).unwrap()
                     }
                     _ => {}
                 }
-                if i == 100 {
+                if i == 100000 {
                     break;
                 }
             }
@@ -80,6 +101,5 @@ pub(crate) fn run_pipeline(rib_ts: i64) {
         });
     }
     drop(ch_out);
-    pool.join();
-    consumer.join();
+    run_consumer(ch_in, &pool, config);
 }

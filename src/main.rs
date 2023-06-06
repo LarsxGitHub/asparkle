@@ -1,6 +1,8 @@
 use bgpkit_broker::{BgpkitBroker, BrokerItem, QueryParams};
 use bgpkit_parser::BgpkitParser;
 use chrono::{DateTime, FixedOffset, NaiveDate};
+use mysql;
+
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
 use std::any::Any;
@@ -16,10 +18,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
 
+use serde::{Deserialize, Serialize};
+use serde_yaml::{self};
+
 // the percentiles that will be calculated in addition to min and max.
 const PERCENTILE_LIST: [f64; 7] = [0.05, 0.10, 0.25, 0.5, 0.75, 0.90, 0.95];
 
 mod aspa;
+mod db;
 mod peeringdb;
 mod pipeline;
 mod utils;
@@ -62,39 +68,40 @@ fn parse_input_ts(cli_args: &ArgMatches) -> i64 {
     date.timestamp()
 }
 
-fn parse_pdb_file(cli_args: &ArgMatches) -> String {
+fn parse_file_with_ext(cli_args: &ArgMatches, file_key: &str, extension: &str) -> String {
     // get path from cli args
-    let pdb_file = cli_args
-        .get_one::<String>("pdb_dump")
-        .expect("Required parameter 'aspa_dump' was not provided.");
+    let file = cli_args.get_one::<String>(&file_key).expect(&format!(
+        "Required parameter '{}' was not provided.",
+        file_key
+    ));
 
     // canonicalize the path
-    let pdb_file_canon =
-        fs::canonicalize(pdb_file).expect(&format!("Unable to canonicalize path {:?}", pdb_file));
+    let file_canon =
+        fs::canonicalize(file).expect(&format!("Unable to canonicalize path {:?}", file));
 
     // check whether path is a file
-    if !PathBuf::from(&pdb_file_canon).is_file() {
+    if !PathBuf::from(&file_canon).is_file() {
         exit_msg!(
-            "ERROR: Required parameter 'pdb_dump' was set to {}, which is not a file.",
-            pdb_file
+            "ERROR: Required parameter '{}' was set to {}, which is not a file.",
+            file_key,
+            file
         );
     }
 
     // check that extension is .json
-    if !pdb_file.ends_with(".json") {
+    if !file.ends_with(extension) {
         exit_msg!(
-            "ERROR: Required parameter 'pdb_dump' was set to {}, which does not have a .json suffix.",
-            pdb_file
+            "ERROR: Required parameter '{}' was set to {}, which does not have a {} suffix.",
+            file_key,
+            file,
+            extension
         );
     }
 
-    pdb_file_canon
-        .into_os_string()
-        .into_string()
-        .expect(&format!(
-            "Unable to get os string from aspa_dir {}",
-            pdb_file
-        ))
+    file_canon.into_os_string().into_string().expect(&format!(
+        "Unable to get os string from {} ({})",
+        file_key, file
+    ))
 }
 
 fn parse_aspa_dir(cli_args: &ArgMatches) -> String {
@@ -185,6 +192,14 @@ fn get_cli_parameters() -> ArgMatches {
                 .required(true)
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
                 .help("the path to a PeeringDB Json dump file."),
+        )
+        .arg(
+            Arg::new("config")
+                .short('c')
+                .long("config")
+                .required(true)
+                .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                .help("the path to the config.yaml file."),
         )
         .get_matches()
 }
@@ -380,13 +395,36 @@ fn derive_attestation_statistics(attestations: &Vec<AsProviderAttestation>) {
     );
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Config {
+    db_out_mysql_server: String,
+    db_out_mysql_port: u32,
+    db_out_db_name: String,
+    db_out_db_user: String,
+    db_out_db_pwd: String,
+    pipeline_num_bgpkit_workers: u32,
+}
+
+/// loads the yaml config file.
+fn load_yaml_config(file_name: &str) -> Config {
+    let f = std::fs::File::open(file_name)
+        .expect(&format!("Could not open config file at {}", file_name));
+    serde_yaml::from_reader(f).expect("Could not read values from config file at ./data/config.yml")
+}
+
 fn main() {
     let cli_params = get_cli_parameters();
+    let config_file = parse_file_with_ext(&cli_params, "config", ".yml");
+    let config = load_yaml_config(&config_file);
+
+    println!("{:?}", config);
     let start_ts = parse_input_ts(&cli_params);
     let aspa_dir = parse_aspa_dir(&cli_params);
-    let pdb_file = parse_pdb_file(&cli_params);
+    let pdb_file = parse_file_with_ext(&cli_params, "pdb_dump", ".json");
 
-    /**
+    let conn_pool = db::get_db_connection_pool(&config);
+
+    /*
     let aspa_files = aspa::get_asa_files("./data/asa_samples/").unwrap();
     let attestations: Vec<AsProviderAttestation> = aspa::read_aspa_records(&aspa_files).unwrap();
     let rib_urls = bgpkit_get_ribs_size_ordered(start_ts);
@@ -407,7 +445,7 @@ fn main() {
         route_servers_v4.len(),
         route_servers_v6.len()
     )
-    **/
-    pipeline::run_pipeline(start_ts);
+    */
+    //pipeline::run_pipeline(start_ts, &aspa_dir, &pdb_file, &config);
     // derive_attestation_statistics(&attestations);
 }

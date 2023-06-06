@@ -45,6 +45,8 @@ pub(crate) enum RampDirection {
 pub(crate) struct AspaValidatedRoute {
     pub pfx: ipnet::IpNet,
     pub path: Vec<u32>,
+    pub apex: u32,
+    pub apex_reason: UpInfSuccessReason,
     pub witnesses: Vec<AspaAttestWitness>,
 }
 
@@ -100,6 +102,7 @@ pub(crate) enum UpstreamExtractionResult {
 /// Hence, this validator needs to infer which part of the path belongs to the
 /// upstream and which part belongs to the downstream. It does so opportunistically and performs
 /// ASPA validation on the upstream part of the path.
+#[derive(Debug, Clone)]
 pub(crate) struct OpportunisticAspaPathValidator {
     // attestation lookups per afi
     upstreams_ipv4: HashMap<u32, HashSet<u32>>,
@@ -494,9 +497,16 @@ impl OpportunisticAspaPathValidator {
             }
         }
 
+        let apex = match upstream.len() {
+            0 => downstream[downstream.len() - 1],
+            _ => upstream[0],
+        };
+
         // collected pieces together.
         let val_route = AspaValidatedRoute {
             pfx: elem.prefix.prefix,
+            apex: apex,
+            apex_reason: reason,
             path: elem.as_path.as_ref().unwrap().to_u32_vec().unwrap(),
             witnesses,
         };

@@ -36,3 +36,12 @@ pub(crate) fn extract_route_servers(
         }
     }
 }
+
+pub(crate) fn load_routeservers_from_dump(
+    file_path: &str,
+    router_servers_ipv4: &mut HashSet<u32>,
+    router_servers_ipv6: &mut HashSet<u32>,
+) {
+    let json = load_pdb_json_from_file(file_path);
+    extract_route_servers(json, router_servers_ipv4, router_servers_ipv6);
+}
