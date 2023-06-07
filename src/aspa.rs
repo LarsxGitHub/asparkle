@@ -4,6 +4,7 @@ use ipnet::IpNet;
 use itertools::Itertools;
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
+use serde_derive::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
@@ -68,7 +69,7 @@ pub(crate) enum OpportunisticAspaValidationState {
     Insufficient,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum UpInfSuccessReason {
     SuccessTierone,        // Successful inference based on a Tier 1 ASN.
     SuccessTieronePeer,    // Successful inference based on the next hop of a Tier 1 ASN.

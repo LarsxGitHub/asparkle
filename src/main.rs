@@ -162,6 +162,66 @@ fn parse_aspa_dir(cli_args: &ArgMatches) -> String {
         ))
 }
 
+fn parse_dir(cli_args: &ArgMatches, dir_key: &str, extension: Option<&str>) -> String {
+    // get path from cli args
+    let dir = cli_args
+        .get_one::<String>(dir_key)
+        .expect("Required parameter {} was not provided.", dir_key);
+
+    // canonicalize the path
+    let dir_canon = fs::canonicalize(dir).expect(&format!("Unable to canonicalize path {:?}", dir));
+
+    // check whether path is a directory
+    if !PathBuf::from(&dir_canon).is_dir() {
+        exit_msg!(
+            "ERROR: Required parameter '{}' was set to {}, which is not a directory.",
+            dir_key,
+            dir
+        );
+    }
+
+    // do we expect files with extensions to be in the dir?
+    if let Some(suffix) = extension {
+        let mut has_some_file = false;
+        for entry in fs::read_dir(&dir_canon).expect(&format!(
+            "Unable to read contents of {} directory {(}).",
+            dir_key, dir
+        )) {
+            let link = entry
+                .expect(&format!(
+                    "Unable to obtain path for some file in '{}' ({}).",
+                    dir_key, dir
+                ))
+                .path()
+                .into_os_string()
+                .into_string()
+                .expect(&format!(
+                    "Unable to obtain os string for some file in '{}' ({}).",
+                    dir_key, dir
+                ));
+            // ensure file has right extension
+            if link.ends_with(suffix) {
+                has_some_file = true;
+                break;
+            }
+        }
+
+        if !has_some_file {
+            exit_msg!(
+                "ERROR: Can't find any *{} files in {} ({}).",
+                suffix,
+                dir_key,
+                dir
+            );
+        }
+    }
+
+    dir_canon.into_os_string().into_string().expect(&format!(
+        "Unable to get os string from '{}' ({}).",
+        dir_key, dir
+    ))
+}
+
 /// Gets CLI parameters passed to the binary
 fn get_cli_parameters() -> ArgMatches {
     clap::Command::new("asparkle")
@@ -192,6 +252,14 @@ fn get_cli_parameters() -> ArgMatches {
                 .required(true)
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
                 .help("the path to a PeeringDB Json dump file."),
+        )
+        .arg(
+            Arg::new("json_out_dir")
+                .short('j')
+                .long("json_out_dir")
+                .required(true)
+                .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                .help("the path to a directory in which you want to dump the resulting json file."),
         )
         .arg(
             Arg::new("config")
@@ -397,11 +465,6 @@ fn derive_attestation_statistics(attestations: &Vec<AsProviderAttestation>) {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Config {
-    db_out_mysql_server: String,
-    db_out_mysql_port: u32,
-    db_out_db_name: String,
-    db_out_db_user: String,
-    db_out_db_pwd: String,
     pipeline_num_bgpkit_workers: u32,
 }
 
@@ -419,7 +482,8 @@ fn main() {
 
     println!("{:?}", config);
     let start_ts = parse_input_ts(&cli_params);
-    let aspa_dir = parse_aspa_dir(&cli_params);
+    let aspa_dir = parse_dir(&cli_params, "aspa_dir", Some(".asa"));
+    let json_out_dir = parse_dir(&cli_params, "json_out_dir", None);
     let pdb_file = parse_file_with_ext(&cli_params, "pdb_dump", ".json");
 
     let conn_pool = db::get_db_connection_pool(&config);
