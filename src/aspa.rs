@@ -4,10 +4,12 @@ use ipnet::IpNet;
 use itertools::Itertools;
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
 use rpki::repository::resources::AddressFamily;
-use serde_derive::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
+
+#[macro_use]
+use serde::{Deserialize, Serialize};
 
 use crate::utils;
 
@@ -21,21 +23,21 @@ pub(crate) enum AspaAttestWitness {
 /// Offense against an ASPA attestation
 #[derive(Debug, PartialEq)]
 pub(crate) struct AspaAttestOffense {
-    dir: RampDirection,
-    cas: u32,
-    pas_off: u32,
+    pub dir: RampDirection,
+    pub cas: u32,
+    pub pas_off: u32,
 }
 
 /// Confirmation for an ASPA attestation
 #[derive(Debug, PartialEq)]
 pub(crate) struct AspaAttestConfirmation {
-    dir: RampDirection,
-    cas: u32,
-    pas: u32,
+    pub dir: RampDirection,
+    pub cas: u32,
+    pub pas: u32,
 }
 
 /// whether the Witness was derived from the up or downstream.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum RampDirection {
     Up,
     Down,
@@ -69,7 +71,7 @@ pub(crate) enum OpportunisticAspaValidationState {
     Insufficient,
 }
 
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize, Clone, Copy)]
 pub(crate) enum UpInfSuccessReason {
     SuccessTierone,        // Successful inference based on a Tier 1 ASN.
     SuccessTieronePeer,    // Successful inference based on the next hop of a Tier 1 ASN.

@@ -1,6 +1,6 @@
 use bgpkit_broker::{BgpkitBroker, BrokerItem, QueryParams};
 use bgpkit_parser::BgpkitParser;
-use chrono::{DateTime, FixedOffset, NaiveDate};
+use chrono::{DateTime, FixedOffset, NaiveDate, Timelike};
 use mysql;
 
 use rpki::repository::aspa::{AsProviderAttestation, Aspa};
@@ -18,6 +18,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
 
+use crate::utils::intersect_hashmap_sets;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{self};
 
@@ -42,30 +43,42 @@ macro_rules! exit_msg {
 /// parses the input date and provides the timestamp for start-of-day DateTime.
 fn parse_input_ts(cli_args: &ArgMatches) -> i64 {
     let date_str: &String;
-    match cli_args.get_one::<String>("date") {
+    match cli_args.get_one::<String>("datetime") {
         Some(d) => date_str = d,
         None => {
-            exit_msg!("ERROR: Required parameter 'date' was not provided.");
+            exit_msg!("ERROR: Required parameter 'datetime' was not provided.");
         }
     };
 
     // check if date is malformatted.
-    if let Err(e) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-        exit_msg!("ERROR: Date is incorrectly formatted, see: {}", e);
+    if let Err(e) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d_%H") {
+        exit_msg!(
+            "ERROR: Date is incorrectly formatted, should be %Y-%m-%d_%H, is {}",
+            date_str
+        );
     }
 
     // extend date to start-of-day DateTimeit push origin
-    let date_str = String::from(date_str) + " 00:00:00.000 +0000";
-    let date: DateTime<FixedOffset>;
-    match DateTime::parse_from_str(&date_str, "%Y-%m-%d %H:%M:%S%.3f %z") {
-        Ok(dt) => date = dt,
+    let date_str = String::from(date_str) + ":00:00.000 +0000";
+    let datetime: DateTime<FixedOffset>;
+    match DateTime::parse_from_str(&date_str, "%Y-%m-%d_%H:%M:%S%.3f %z") {
+        Ok(dt) => {
+            if !(vec![0, 8, 16]).contains(&dt.hour()) {
+                exit_msg!(
+                    "The datetime string {} has an hour different from 0, 8, and 16.",
+                    date_str
+                );
+            }
+
+            datetime = dt
+        }
         Err(e) => {
             // this should never happen
             exit_msg!("ERROR: NaiveDate to DateTime conversion failed, see: {}", e);
         }
     }
 
-    date.timestamp()
+    datetime.timestamp()
 }
 
 fn parse_file_with_ext(cli_args: &ArgMatches, file_key: &str, extension: &str) -> String {
@@ -166,7 +179,7 @@ fn parse_dir(cli_args: &ArgMatches, dir_key: &str, extension: Option<&str>) -> S
     // get path from cli args
     let dir = cli_args
         .get_one::<String>(dir_key)
-        .expect("Required parameter {} was not provided.", dir_key);
+        .expect(&format!("Required parameter {} was not provided.", dir_key));
 
     // canonicalize the path
     let dir_canon = fs::canonicalize(dir).expect(&format!("Unable to canonicalize path {:?}", dir));
@@ -184,7 +197,7 @@ fn parse_dir(cli_args: &ArgMatches, dir_key: &str, extension: Option<&str>) -> S
     if let Some(suffix) = extension {
         let mut has_some_file = false;
         for entry in fs::read_dir(&dir_canon).expect(&format!(
-            "Unable to read contents of {} directory {(}).",
+            "Unable to read contents of {} directory ({}).",
             dir_key, dir
         )) {
             let link = entry
@@ -230,12 +243,12 @@ fn get_cli_parameters() -> ArgMatches {
         .version("0.1.0")
         // Logging settings
         .arg(
-            Arg::new("date")
+            Arg::new("datetime")
                 .short('d')
-                .long("date")
+                .long("datetime")
                 .required(true)
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
-                .help("The date for which you want to calculate statistics."),
+                .help("The date and hour for which you want to calculate statistics (formatted as %Y-%m-%d_%H). As hours only 0, 8, and 16 are accepted options."),
         )
         .arg(
             Arg::new("aspa_dir")
@@ -475,6 +488,22 @@ fn load_yaml_config(file_name: &str) -> Config {
     serde_yaml::from_reader(f).expect("Could not read values from config file at ./data/config.yml")
 }
 
+fn get_json_output_filename(cli_args: &ArgMatches) -> String {
+    // get the output dir
+    let json_out_dir = parse_dir(cli_args, "json_out_dir", None);
+
+    // get the datetime => was already validated earlier.
+    let datetime_str: &String;
+    match cli_args.get_one::<String>("datetime") {
+        Some(d) => datetime_str = d,
+        None => {
+            exit_msg!("ERROR: Required parameter 'date' was not provided.");
+        }
+    };
+
+    format!("{}/aspa_observatory_{}.json", json_out_dir, datetime_str)
+}
+
 fn main() {
     let cli_params = get_cli_parameters();
     let config_file = parse_file_with_ext(&cli_params, "config", ".yml");
@@ -483,33 +512,8 @@ fn main() {
     println!("{:?}", config);
     let start_ts = parse_input_ts(&cli_params);
     let aspa_dir = parse_dir(&cli_params, "aspa_dir", Some(".asa"));
-    let json_out_dir = parse_dir(&cli_params, "json_out_dir", None);
     let pdb_file = parse_file_with_ext(&cli_params, "pdb_dump", ".json");
+    let json_out_fn = get_json_output_filename(&cli_params);
 
-    let conn_pool = db::get_db_connection_pool(&config);
-
-    /*
-    let aspa_files = aspa::get_asa_files("./data/asa_samples/").unwrap();
-    let attestations: Vec<AsProviderAttestation> = aspa::read_aspa_records(&aspa_files).unwrap();
-    let rib_urls = bgpkit_get_ribs_size_ordered(start_ts);
-    for broker_item in rib_urls {
-        bgpkit_get_routes(&broker_item, &attestations);
-        break;
-    }
-
-    let file_path =
-        "/Users/lprehn/CLionProjects/aspa-observatory/data/pdb/peeringdb_2_dump_2023_05_01.json";
-    let pdb_json = peeringdb::load_pdb_json_from_file(file_path);
-
-    let mut route_servers_v4: HashSet<u32> = HashSet::new();
-    let mut route_servers_v6: HashSet<u32> = HashSet::new();
-    peeringdb::extract_route_servers(pdb_json, &mut route_servers_v4, &mut route_servers_v6);
-    println!(
-        "Read {} IPv4 and {} IPv6 Route Server ASNs.",
-        route_servers_v4.len(),
-        route_servers_v6.len()
-    )
-    */
-    //pipeline::run_pipeline(start_ts, &aspa_dir, &pdb_file, &config);
-    // derive_attestation_statistics(&attestations);
+    pipeline::run_pipeline(start_ts, &aspa_dir, &pdb_file, &json_out_fn, &config);
 }

@@ -1,5 +1,7 @@
 use crate::aspa;
-use serde_derive::{Deserialize, Serialize};
+
+#[macro_use]
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, Debug)]
 pub(crate) enum JsonWitnessType {
@@ -22,14 +24,15 @@ pub(crate) struct MetaData {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub(crate) struct LatestDetails {
-    attestation_file: String,
-    cas: u32,
-    pas: u32,
-    witness_type: JsonWitnessType,
-    example_route_pfx: String,
-    example_route_path: String,
-    example_route_apex: u32,
-    example_route_apex_reason: aspa::UpInfSuccessReason,
+    pub attestation_file: String,
+    pub cas: u32,
+    pub pas: u32,
+    pub witness_type: JsonWitnessType,
+    pub example_route_pfx: String,
+    pub example_route_path: String,
+    pub example_route_apex: u32,
+    pub example_route_apex_reason: aspa::UpInfSuccessReason,
+    pub example_route_ramp_direction: aspa::RampDirection,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
