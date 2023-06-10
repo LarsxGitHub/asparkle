@@ -37,7 +37,7 @@ pub(crate) struct AspaAttestConfirmation {
 }
 
 /// whether the Witness was derived from the up or downstream.
-#[derive(Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub(crate) enum RampDirection {
     Up,
     Down,
@@ -95,6 +95,24 @@ pub(crate) enum UpInfFailReason {
 pub(crate) enum UpstreamExtractionResult {
     Success(Vec<u32>, Vec<u32>, UpInfSuccessReason),
     Failure(UpInfFailReason),
+}
+
+/// Please note, ASPA became AFI-agnostic in latest draft.
+pub(crate) fn lookup_from_attests(
+    attestations: &Vec<(AsProviderAttestation, String)>,
+) -> HashMap<u32, HashSet<(u32, &String)>> {
+    let mut lookup: HashMap<u32, HashSet<(u32, &String)>> = HashMap::new();
+
+    // parse attestations
+    for (attest, file) in attestations.into_iter() {
+        let customer = attest.customer_as().into_u32();
+        for provider_as_set in attest.provider_as_set().iter() {
+            let provider: u32 = provider_as_set.provider().into_u32();
+            utils::add_to_hashmap_set(&mut lookup, &customer, &(provider, file));
+        }
+    }
+
+    lookup
 }
 
 /// This object opportunistically infers the ASPA state of AS_PATHs.
@@ -181,10 +199,10 @@ impl OpportunisticAspaPathValidator {
     /// Reads Set of Providers for Customer ASes from a vector of AsProviderAttestation.
     pub(crate) fn add_upstreams_from_attestations(
         &mut self,
-        attestations: &Vec<AsProviderAttestation>,
+        attestations: &Vec<(AsProviderAttestation, String)>,
     ) {
         // parse attestations
-        for attest in attestations {
+        for (attest, _) in attestations {
             let customer = attest.customer_as().into_u32();
             for provider_as_set in attest.provider_as_set().iter() {
                 let provider: u32 = provider_as_set.provider().into_u32();
@@ -532,12 +550,15 @@ impl OpportunisticAspaPathValidator {
 /// Returns a Vector containing the AsProviderAttestations within all provided files
 pub(crate) fn read_aspa_records(
     files: &Vec<String>,
-) -> Result<Vec<AsProviderAttestation>, Box<dyn Error>> {
-    let mut attestations: Vec<AsProviderAttestation> = Vec::new();
+) -> Result<Vec<(AsProviderAttestation, String)>, Box<dyn Error>> {
+    let mut attestations: Vec<(AsProviderAttestation, String)> = Vec::new();
     for filepath in files {
         let data = fs::read(filepath)?;
         let aspa = Aspa::decode(data.as_ref(), true)?;
-        attestations.push(aspa.content().clone());
+        attestations.push((
+            aspa.content().clone(),
+            aspa.cert().signed_object().unwrap().to_string(),
+        ));
     }
     Ok(attestations)
 }

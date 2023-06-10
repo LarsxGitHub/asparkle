@@ -1,8 +1,10 @@
 use crate::aspa::{
     AspaAttestWitness, AspaValidatedRoute, OpportunisticAspaPathValidator,
-    OpportunisticAspaValidationState, RampDirection,
+    OpportunisticAspaValidationState, RampDirection, UpInfFailReason, UpInfSuccessReason,
 };
-use crate::db::{JsonWitnessType, LatestDetails};
+use crate::db::{
+    dump_to_json, AspaSummary, JsonContainer, JsonWitnessType, LatestDetails, MetaData,
+};
 use crate::peeringdb;
 use crate::{aspa, Config};
 use bgpkit_broker::{BgpkitBroker, BrokerItem};
@@ -25,30 +27,7 @@ fn bgpkit_get_ribs_size_ordered(ts: i64) -> Vec<BrokerItem> {
         .collect()
 }
 
-fn process_collector(ch_out: Sender<AspaValidatedRoute>, target: BrokerItem) {
-    let aspa_val: OpportunisticAspaPathValidator = OpportunisticAspaPathValidator::new();
-    let parser = BgpkitParser::new(target.url.as_str()).unwrap();
-
-    for (i, elem) in parser.into_elem_iter().enumerate() {
-        match aspa_val.validate_opportunistically(&elem) {
-            OpportunisticAspaValidationState::InvalidAspa(val_route)
-            | OpportunisticAspaValidationState::Valid(val_route) => ch_out.send(val_route).unwrap(),
-            _ => {}
-        }
-        if i == 100 {
-            break;
-        }
-    }
-}
-
-fn run_consumer(
-    ch_in: Receiver<AspaValidatedRoute>,
-    pool: &ThreadPool,
-    json_out_fn: &str,
-    _config: &Config,
-) {
-    println!("CONSUMER STARTED");
-
+fn run_consumer(ch_in: Receiver<AspaValidatedRoute>) -> HashMap<u32, HashMap<u32, LatestDetails>> {
     let mut witness_map: HashMap<u32, HashMap<u32, LatestDetails>> = HashMap::new();
 
     let mut count = 0;
@@ -87,6 +66,7 @@ fn run_consumer(
                 witness_map.insert(cas, HashMap::new());
             }
 
+            // if this (cas,pas)-pair has no example route yet, add one.
             if !witness_map.get_mut(&cas).unwrap().contains_key(&pas) {
                 witness_map.get_mut(&cas).unwrap().insert(
                     pas,
@@ -110,8 +90,66 @@ fn run_consumer(
             }
         }
     }
-    pool.join();
-    println!("{:#?}", witness_map);
+    witness_map
+}
+
+fn get_unseen_details(cas: &u32, pas: &u32, file: &String) -> LatestDetails {
+    LatestDetails {
+        attestation_file: String::from(file),
+        cas: *cas,
+        pas: *pas,
+        witness_type: JsonWitnessType::UNSEEN,
+        example_route_pfx: "".to_string(),
+        example_route_path: "".to_string(),
+        example_route_apex: 0,
+        example_route_apex_reason: UpInfSuccessReason::SuccessAttestation,
+        example_route_ramp_direction: RampDirection::Up,
+    }
+}
+
+pub(crate) fn consolidate_results(
+    attest_lookup: &HashMap<u32, HashSet<(u32, &String)>>,
+    witness_map: &HashMap<u32, HashMap<u32, LatestDetails>>,
+) -> Vec<LatestDetails> {
+    let mut rows: Vec<LatestDetails> = Vec::new();
+    for (cas, provider_set) in attest_lookup.into_iter() {
+        // check from known attestations into witnesses -> matches only UNSEEN or CONFIRMED
+        for (pas, file) in provider_set.into_iter() {
+            if witness_map.contains_key(cas) {
+                // we have had witnesses for at least some providers, unwrap is safe.
+                if witness_map.get(cas).unwrap().contains_key(pas) {
+                    // we also had a witness for this
+                    let mut details = witness_map.get(cas).unwrap().get(pas).unwrap().clone();
+                    details.attestation_file = String::from(*file);
+                    rows.push(details);
+                } else {
+                    let details = get_unseen_details(cas, pas, file);
+                    rows.push(details);
+                }
+            } else {
+                // not even customer_as was seen ...
+                let details = get_unseen_details(cas, pas, file);
+                rows.push(details);
+            }
+        }
+        // check for ASNs in witnesses but not attestations -> matches only Offenses.
+        let spas_only: HashSet<u32> =
+            HashSet::from_iter(provider_set.into_iter().map(|pair| pair.0).into_iter());
+
+        if !witness_map.contains_key(cas) {
+            continue;
+        }
+
+        for (pas, details) in witness_map.get(cas).unwrap().iter() {
+            // if this pas is not in original spas, then it's an offense.
+            if !spas_only.contains(pas) {
+                let mut details = details.clone();
+                details.attestation_file = "None".to_string();
+                rows.push(details);
+            }
+        }
+    }
+    rows
 }
 
 pub(crate) fn run_pipeline(
@@ -130,10 +168,15 @@ pub(crate) fn run_pipeline(
         &mut router_servers_ipv6,
     );
 
-    // load attestations
+    // load available asa files
     let asa_files =
         aspa::get_asa_files(aspa_dir).expect("Unable to obtain asa files from aspa_dir.");
+
+    // get attestations from the asa files
     let attests = aspa::read_aspa_records(&asa_files).expect("Unable to read asa file.");
+
+    // re-organize attestations in a format that's optimized for lookups. (needed much later)
+    let attest_lookup = aspa::lookup_from_attests(&attests);
 
     // get broker items at rib ts
     let broker_items = bgpkit_get_ribs_size_ordered(rib_ts);
@@ -148,25 +191,51 @@ pub(crate) fn run_pipeline(
     aspa_val.add_upstreams_from_attestations(&attests);
 
     for target in broker_items {
+        // ensure needed structures are cloned and ready to move into closure
         let ch_out_cl = ch_out.clone();
         let aspa_val_cl = aspa_val.clone();
+
+        // enqueue the spawn of a new thread
         pool.execute(move || {
+            // closure that processes the data of a single route collector.
             let parser = BgpkitParser::new(target.url.as_str()).unwrap();
+
+            // iterate through elements
             for (i, elem) in parser.into_elem_iter().enumerate() {
+                // validate the route and send successful messages to consumer
                 match aspa_val_cl.validate_opportunistically(&elem) {
                     OpportunisticAspaValidationState::InvalidAspa(val_route)
                     | OpportunisticAspaValidationState::Valid(val_route) => {
                         ch_out_cl.send(val_route).unwrap()
                     }
-                    _ => {}
+                    _ => {} // no opportunities, just ignore this route.
                 }
-                if i == 100000 {
+
+                // stop after 100, just for testing.
+                if i == 100 {
                     break;
                 }
             }
-            //println!("Finished item {:?}", &target);
         });
     }
+
+    // we delivered clones to all threads, so we still have to drop the initial reference.
     drop(ch_out);
-    run_consumer(ch_in, &pool, json_out_fn, config);
+
+    // wait till all threads finished and their outputs were gathered
+    let witness_map = run_consumer(ch_in);
+    pool.join();
+
+    let latest_details_rows = consolidate_results(&attest_lookup, &witness_map);
+    let aspa_summary = AspaSummary::from(&latest_details_rows);
+    let meta_data = MetaData {
+        timestamp: rib_ts as u32,
+    };
+    let json_container = JsonContainer {
+        latest_details: latest_details_rows,
+        aspa_summary: aspa_summary,
+        meta_data: meta_data,
+    };
+
+    dump_to_json(json_out_fn, &json_container);
 }
