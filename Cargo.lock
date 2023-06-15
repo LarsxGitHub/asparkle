@@ -126,6 +126,7 @@ dependencies = [
  "itertools",
  "log",
  "mysql",
+ "reqwest",
  "rpki",
  "serde",
  "serde_json",
