@@ -335,37 +335,72 @@ impl OpportunisticAspaPathValidator {
         for (idx, asn) in path_dense.clone().into_iter().enumerate().rev() {
             // 4. we hit a Tier 1 ASN, can't go higher.
             if tier_ones.contains(&asn) {
-                let mut start_idx = idx;
-                // can't go up, but how about sideways?
-                if idx > 0 {
-                    let next_hop = path_dense.get(idx - 1).unwrap();
-                    if tier_ones.contains(next_hop) | route_servers.contains(next_hop) {
-                        start_idx = idx - 1;
+                // this is the left-most AS, no further checking
+                if idx == 0 {
+                    let upstream = path_dense.get(idx..).unwrap();
+                    let downstream: &[u32] = &[];
+
+                    // path is too short for aspa validation ...
+                    if upstream.len() <= 1 {
+                        return UpstreamExtractionResult::Failure(
+                            UpInfFailReason::FailureInsufficient,
+                        );
                     }
-                }
-                // unwrap safe as it returns at least itself.
-                let downstream = path_dense.get(..start_idx + 1).unwrap();
-                let upstream = path_dense.get(start_idx..).unwrap();
 
-                // path is too short for aspa validation ...
-                if (upstream.len() <= 1) & (downstream.len() <= 1) {
-                    return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
-                }
-
-                // make sure to report the correct reasoning.
-                if idx == start_idx {
                     return UpstreamExtractionResult::Success(
                         Vec::from(downstream),
                         Vec::from(upstream),
                         UpInfSuccessReason::SuccessTierone,
                     );
-                } else {
+                }
+
+                // This is some intermediate AS, check to the left.
+                // can't go up further, but how about to a route server?
+                let next_hop = path_dense.get(idx - 1).unwrap();
+                // Note: Going to another Tier-1 would also be a "sideways" move; however,
+                // Tier-1s are not supppsed to add each other into their provider set unless
+                // they are siblings -> don't add the second tier-1 to the upstream.
+                if route_servers.contains(next_hop) {
+                    let upstream = path_dense.get(idx - 1..).unwrap();
+                    let downstream = path_dense.get(..idx).unwrap();
+
+                    // path is too short for aspa validation ...
+                    if (upstream.len() <= 1) & (downstream.len() <= 1) {
+                        return UpstreamExtractionResult::Failure(
+                            UpInfFailReason::FailureInsufficient,
+                        );
+                    }
+
                     return UpstreamExtractionResult::Success(
                         Vec::from(downstream),
                         Vec::from(upstream),
                         UpInfSuccessReason::SuccessTieronePeer,
                     );
                 }
+
+                // Not a route server, are there more tier-1s lined up?
+                let mut stop_idx: i32 = idx as i32;
+                while tier_ones.contains(path_dense.get(stop_idx as usize).unwrap()) {
+                    stop_idx = stop_idx - 1;
+                    if stop_idx == -1 {
+                        break;
+                    }
+                }
+
+                let stop_idx: usize = (stop_idx + 2) as usize;
+                let downstream = path_dense.get(..stop_idx).unwrap();
+                let upstream = path_dense.get(idx..).unwrap();
+
+                // path is too short for aspa validation ...
+                if (upstream.len() <= 1) & (downstream.len() <= 1) {
+                    return UpstreamExtractionResult::Failure(UpInfFailReason::FailureInsufficient);
+                }
+
+                return UpstreamExtractionResult::Success(
+                    Vec::from(downstream),
+                    Vec::from(upstream),
+                    UpInfSuccessReason::SuccessTierone,
+                );
             }
 
             // 5. we hit a non-transparent route server (which might be part of an aspa attestation.)
@@ -781,8 +816,8 @@ mod tests {
             &aspa_val,
             &elem,
             vec![64503, 174],
-            vec![174, 701, 64501, 64500],
-            UpInfSuccessReason::SuccessTieronePeer,
+            vec![701, 64501, 64500],
+            UpInfSuccessReason::SuccessTierone,
         );
 
         // success test second tier 1, yet only one of them is also a tier 1 in ipv6
@@ -1049,7 +1084,9 @@ mod tests {
         let val_route = AspaValidatedRoute {
             pfx: elem.prefix.prefix,
             path: elem.as_path.as_ref().unwrap().to_u32_vec().unwrap(),
-            witnesses,
+            witnesses: witnesses,
+            apex: 64500,
+            apex_reason: UpInfSuccessReason::SuccessOtc,
         };
 
         assert_witnesses(&aspa_val, &elem, &val_route, true)
@@ -1071,7 +1108,9 @@ mod tests {
         let val_route = AspaValidatedRoute {
             pfx: elem.prefix.prefix,
             path: elem.as_path.as_ref().unwrap().to_u32_vec().unwrap(),
-            witnesses,
+            witnesses: witnesses,
+            apex: 64509,
+            apex_reason: UpInfSuccessReason::SuccessOtc,
         };
 
         assert_witnesses(&aspa_val, &elem, &val_route, false)
