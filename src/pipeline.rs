@@ -227,7 +227,6 @@ pub(crate) fn run_pipeline(
 
                 if i == 100 {
                     meta_out_cl.send(target.collector_id.to_string()).unwrap();
-                    break;
                 }
             }
         });
