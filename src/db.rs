@@ -27,6 +27,7 @@ pub(crate) struct MetaData {
     pub(crate) timestamp: u32,
     pub(crate) routerservers_v4: Vec<u32>,
     pub(crate) routerservers_v6: Vec<u32>,
+    pub(crate) seen_collectors: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

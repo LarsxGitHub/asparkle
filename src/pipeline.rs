@@ -29,9 +29,9 @@ fn bgpkit_get_ribs_size_ordered(ts: i64) -> Vec<BrokerItem> {
 
 fn run_consumer(
     ch_in: Receiver<(String, AspaValidatedRoute)>,
-) -> HashMap<u32, HashMap<u32, LatestDetails>> {
+    meta_in: Receiver<String>,
+) -> (HashMap<u32, HashMap<u32, LatestDetails>>, HashSet<String>) {
     let mut witness_map: HashMap<u32, HashMap<u32, LatestDetails>> = HashMap::new();
-
     let mut count = 0;
     loop {
         // pull in validated route, break once we hit the end of out recv()
@@ -95,7 +95,13 @@ fn run_consumer(
             }
         }
     }
-    witness_map
+
+    let mut seen_collectors: HashSet<String> = HashSet::new();
+    while let Ok(tmp) = meta_in.recv() {
+        seen_collectors.insert(tmp);
+    }
+
+    (witness_map, seen_collectors)
 }
 
 fn get_unseen_details(cas: &u32, pas: &u32, file: &String) -> LatestDetails {
@@ -189,7 +195,8 @@ pub(crate) fn run_pipeline(
 
     // instanciate a worker pool and channels for communication.
     let pool = ThreadPool::new(config.pipeline_num_bgpkit_workers as usize);
-    let (ch_out, ch_in) = unbounded();
+    let (meta_out, meta_in) = unbounded(); // meta data
+    let (ch_out, ch_in) = unbounded(); // actual data
 
     //set up validator
     let mut aspa_val: OpportunisticAspaPathValidator = OpportunisticAspaPathValidator::new();
@@ -199,6 +206,7 @@ pub(crate) fn run_pipeline(
     for target in broker_items {
         // ensure needed structures are cloned and ready to move into closure
         let ch_out_cl = ch_out.clone();
+        let meta_out_cl = meta_out.clone();
         let aspa_val_cl = aspa_val.clone();
 
         // enqueue the spawn of a new thread
@@ -218,6 +226,7 @@ pub(crate) fn run_pipeline(
                 }
 
                 if i == 100 {
+                    meta_out_cl.send(target.collector_id.to_string()).unwrap();
                     break;
                 }
             }
@@ -226,17 +235,19 @@ pub(crate) fn run_pipeline(
 
     // we delivered clones to all threads, so we still have to drop the initial reference.
     drop(ch_out);
+    drop(meta_out);
 
     // wait till all threads finished and their outputs were gathered
-    let witness_map = run_consumer(ch_in);
+    let (witness_map, collectors) = run_consumer(ch_in, meta_in);
     pool.join();
 
     let latest_details_rows = consolidate_results(&attest_lookup, &witness_map);
     let aspa_summary = AspaSummary::from(&latest_details_rows);
     let meta_data = MetaData {
         timestamp: rib_ts as u32,
-        routerservers_v4: router_servers_ipv4.into_iter().collect(),
-        routerservers_v6: router_servers_ipv6.into_iter().collect(),
+        routerservers_v4: router_servers_ipv4.into_iter().sorted().collect(),
+        routerservers_v6: router_servers_ipv6.into_iter().sorted().collect(),
+        seen_collectors: collectors.into_iter().sorted().collect(),
     };
     let json_container = JsonContainer {
         latest_details: latest_details_rows,
