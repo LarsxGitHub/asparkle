@@ -210,11 +210,6 @@ pub(crate) fn run_pipeline(
                     }
                     _ => {} // no opportunities, just ignore this route.
                 }
-
-                // stop after 100, just for testing.
-                if i == 100 {
-                    break;
-                }
             }
         });
     }
