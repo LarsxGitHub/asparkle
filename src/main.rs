@@ -8,7 +8,7 @@ use rpki::repository::resources::AddressFamily;
 use std::any::Any;
 
 use crate::aspa::UpstreamExtractionResult;
-use clap::{Arg, ArgMatches};
+use clap::{Arg, ArgMatches, Command};
 use inc_stats::Percentiles;
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
@@ -18,6 +18,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
 
+use crate::timeline::generate_timeline;
 use crate::utils::intersect_hashmap_sets;
 use serde::{Deserialize, Serialize};
 use serde_yaml::{self};
@@ -29,6 +30,7 @@ mod aspa;
 mod db;
 mod peeringdb;
 mod pipeline;
+mod timeline;
 mod utils;
 
 #[macro_export]
@@ -79,6 +81,26 @@ fn parse_input_ts(cli_args: &ArgMatches) -> i64 {
     }
 
     datetime.timestamp()
+}
+
+fn parse_filename_with_ext(cli_args: &ArgMatches, file_key: &str, extension: &str) -> String {
+    // get path from cli args
+    let file = cli_args.get_one::<String>(&file_key).expect(&format!(
+        "Required parameter '{}' was not provided.",
+        file_key
+    ));
+
+    // check that extension is .json
+    if !file.ends_with(extension) {
+        exit_msg!(
+            "ERROR: Required parameter '{}' was set to {}, which does not have a {} suffix.",
+            file_key,
+            file,
+            extension
+        );
+    }
+
+    file.to_string()
 }
 
 fn parse_file_with_ext(cli_args: &ArgMatches, file_key: &str, extension: &str) -> String {
@@ -237,50 +259,69 @@ fn parse_dir(cli_args: &ArgMatches, dir_key: &str, extension: Option<&str>) -> S
 
 /// Gets CLI parameters passed to the binary
 fn get_cli_parameters() -> ArgMatches {
-    clap::Command::new("asparkle")
+    Command::new("asparkle")
         .about("Deployment and compliance statistic for ASPA records at your fingertips.")
         .author("Lars Prehn")
         .version("0.1.0")
-        // Logging settings
-        .arg(
-            Arg::new("datetime")
-                .short('d')
-                .long("datetime")
-                .required(true)
-                .value_parser(clap::builder::NonEmptyStringValueParser::new())
-                .help("The date and hour for which you want to calculate statistics (formatted as %Y-%m-%d_%H). As hours only 0, 8, and 16 are accepted options."),
-        )
-        .arg( // move to config file
-            Arg::new("aspa_dir")
-                .short('a')
-                .long("aspa_dir")
-                .required(true)
-                .value_parser(clap::builder::NonEmptyStringValueParser::new())
-                .help("the path to a directory containing .asa aspa files."),
-        )
-        .arg(
-            Arg::new("pdb_dump")
-                .short('p')
-                .long("pdb_dump")
-                .required(true)
-                .value_parser(clap::builder::NonEmptyStringValueParser::new())
-                .help("the path to a PeeringDB Json dump file."),
-        )
-        .arg(
-            Arg::new("json_out_dir")
-                .short('j')
-                .long("json_out_dir")
-                .required(true)
-                .value_parser(clap::builder::NonEmptyStringValueParser::new())
-                .help("the path to a directory in which you want to dump the resulting json file."),
-        )
-        .arg(
-            Arg::new("config")
-                .short('c')
-                .long("config")
-                .required(true)
-                .value_parser(clap::builder::NonEmptyStringValueParser::new())
-                .help("the path to the config.yaml file."),
+        .subcommand(Command::new("infer")
+            // Logging settings
+            .arg(
+                Arg::new("datetime")
+                    .short('d')
+                    .long("datetime")
+                    .required(true)
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                    .help("The date and hour for which you want to calculate statistics (formatted as %Y-%m-%d_%H). As hours only 0, 8, and 16 are accepted options."),
+            )
+            .arg( // move to config file
+                Arg::new("aspa_dir")
+                    .short('a')
+                    .long("aspa_dir")
+                    .required(true)
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                    .help("the path to a directory containing .asa aspa files."),
+            )
+            .arg(
+                Arg::new("pdb_dump")
+                    .short('p')
+                    .long("pdb_dump")
+                    .required(true)
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                    .help("the path to a PeeringDB Json dump file."),
+            )
+            .arg(
+                Arg::new("json_out_dir")
+                    .short('j')
+                    .long("json_out_dir")
+                    .required(true)
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                    .help("the path to a directory in which you want to dump the resulting json file."),
+            )
+            .arg(
+                Arg::new("config")
+                    .short('c')
+                    .long("config")
+                    .required(true)
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                    .help("the path to the config.yaml file."),
+            ))
+        .subcommand(Command::new("collect")
+            .arg(
+                Arg::new("inferences_dir")
+                    .short('d')
+                    .long("inferences_dir")
+                    .required(true)
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                    .help("a path to a directory of asparkle-generated output (json) files."),
+            )
+            .arg(
+                Arg::new("out")
+                    .short('o')
+                    .long("out")
+                    .required(true)
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                    .help("the filename to write results to."),
+            )
         )
         .get_matches()
 }
@@ -504,16 +545,32 @@ fn get_json_output_filename(cli_args: &ArgMatches) -> String {
     format!("{}/aspa_observatory_{}.json", json_out_dir, datetime_str)
 }
 
-fn main() {
-    let cli_params = get_cli_parameters();
+fn infer_routine(cli_params: &ArgMatches) {
     let config_file = parse_file_with_ext(&cli_params, "config", ".yml");
     let config = load_yaml_config(&config_file);
 
-    println!("{:?}", config);
     let start_ts = parse_input_ts(&cli_params);
     let aspa_dir = parse_dir(&cli_params, "aspa_dir", Some(".asa"));
     let pdb_file = parse_file_with_ext(&cli_params, "pdb_dump", ".json");
     let json_out_fn = get_json_output_filename(&cli_params);
 
     pipeline::run_pipeline(start_ts, &aspa_dir, &pdb_file, &json_out_fn, &config);
+}
+
+fn collect_routine(cli_params: &ArgMatches) {
+    let inference_dir = parse_dir(&cli_params, "inferences_dir", Some(".json"));
+    let json_out_fn = parse_filename_with_ext(&cli_params, "out", ".json");
+    timeline::generate_timeline(&inference_dir, &json_out_fn);
+}
+
+fn main() {
+    let cli_params = get_cli_parameters();
+
+    match cli_params.subcommand() {
+        Some(("infer", sub_matches)) => infer_routine(&sub_matches),
+        Some(("collect", sub_matches)) => collect_routine(&sub_matches),
+        _ => {
+            unreachable!("aSparkle requires a subcommand (either 'infer' or 'collect') to be run.")
+        }
+    }
 }

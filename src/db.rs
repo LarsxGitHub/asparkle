@@ -46,13 +46,13 @@ pub(crate) struct LatestDetails {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub(crate) struct AspaSummary {
-    cnt_asa_files_total: u32,
-    cnt_uniq_cas: u32,
-    cnt_uniq_pas: u32,
-    cnt_aspa_objects_with_alo_confirm_witness: u32,
-    cnt_aspa_objects_with_alo_offense_witness: u32,
-    cnt_aspa_objects_with_alo_unseen_witness: u32,
-    cnt_aspa_objects_with_unanimous_testimony: u32, // (every cas,pas-pair has a CONFIRM WITNESS, there are no OFFENSE_WITNESSes)
+    pub cnt_asa_files_total: u32,
+    pub cnt_uniq_cas: u32,
+    pub cnt_uniq_pas: u32,
+    pub cnt_aspa_objects_with_alo_confirm_witness: u32,
+    pub cnt_aspa_objects_with_alo_offense_witness: u32,
+    pub cnt_aspa_objects_with_alo_unseen_witness: u32,
+    pub cnt_aspa_objects_with_unanimous_testimony: u32, // (every cas,pas-pair has a CONFIRM WITNESS, there are no OFFENSE_WITNESSes)
 }
 
 impl From<&Vec<LatestDetails>> for AspaSummary {
