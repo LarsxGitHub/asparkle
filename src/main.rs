@@ -250,7 +250,7 @@ fn get_cli_parameters() -> ArgMatches {
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
                 .help("The date and hour for which you want to calculate statistics (formatted as %Y-%m-%d_%H). As hours only 0, 8, and 16 are accepted options."),
         )
-        .arg(
+        .arg( // move to config file
             Arg::new("aspa_dir")
                 .short('a')
                 .long("aspa_dir")

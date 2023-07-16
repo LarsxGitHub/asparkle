@@ -1,23 +1,81 @@
-use chrono::NaiveDateTime;
+use chrono::{Datelike, Duration, TimeZone, Utc};
+use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use log::set_logger_racy;
 use serde_json;
 use std::collections::HashSet;
 use std::fs;
+use std::future::Future;
+use std::io::Read;
+use tokio;
+
+static APP_USER_AGENT: &str = "aSparkle 0.1.0";
 
 pub(crate) fn load_pdb_json_from_file(file_path: &str) -> serde_json::Value {
     let data = fs::read_to_string(file_path).expect("Unable to read file");
     serde_json::from_str(&data).expect("JSON does not have correct format.")
 }
 
-pub(crate) fn load_pdb_json_from_repo(ts: i32) -> serde_json::Value {
-    let naive_dt = NaiveDateTime::from_timestamp(ts, 0);
-    let url =
-        "https://publicdata.caida.org/datasets/peeringdb/2023/06/peeringdb_2_dump_2023_06_14.json";
-    let data = reqwest::blocking::get("https://api.mocki.io/v1/ce5f60e2")
-        .expect(&format!("Unable to read PeeringDB dump from {}", url))
-        .text()
-        .expect(&format!("Unable to read PeeringDB dump from {}", url));
-    serde_json::from_str(&data).expect("JSON does not have correct format.")
+pub(crate) async fn loading_pdb_json_from_repo(ts: i64) {
+    let date_time = Utc.timestamp_opt(ts, 0).unwrap();
+    let yday = date_time - Duration::days(1);
+    let url = format!(
+        "https://publicdata.caida.org/datasets/peeringdb/{}/{:02}/peeringdb_2_dump_{}_{:02}_{:02}.json",
+        yday.year(),
+        yday.month(),
+        yday.year(),
+        yday.month(),
+        yday.day()
+    );
+
+    // get a well-configured client
+    // file is ~80MB; yet the repo's edge only provides few hundred KB/s -> multiple minutes.
+    let client = reqwest::Client::builder()
+        .user_agent(APP_USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(60 * 15))
+        .build()
+        .expect("Unable to build reqwest client.");
+
+    // send the request
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .expect(&format!("Unable to read PeeringDB dump from '{}'.", &url));
+
+    // figure out total content size
+    let total_size: u64 = resp
+        .content_length()
+        .expect(&format!("Failed to get content length from '{}'", &url));
+
+    // Indicatif setup
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+        .progress_chars("#>-"));
+    pb.set_message(&format!("Downloading {}", url));
+
+    let mut stream = resp.bytes_stream();
+    let mut content_buffer: Vec<u8> = Vec::with_capacity(total_size as usize);
+    while let Some(item) = stream.next().await {
+        let chunk = item.expect(&format!("Failed to obtain chunk from '{}'", &url));
+        content_buffer.extend_from_slice(&chunk);
+        pb.set_position(
+            content_buffer
+                .len()
+                .try_into()
+                .expect("Message too large for progress bar."),
+        );
+    }
+    pb.finish_with_message(&format!(
+        "Successfully downloaded {} Bytes from {}.",
+        content_buffer.len(),
+        url
+    ));
+
+    serde_json::from_slice(content_buffer.as_slice())
+        .expect(&format!("Unable to decode Json Message from '{}.'", &url))
 }
 
 pub(crate) fn extract_route_servers(
@@ -60,11 +118,13 @@ pub(crate) fn load_routeservers_from_dump(
 
 #[cfg(test)]
 mod tests {
-    use crate::peeringdb::load_pdb_json_from_repo;
+    use crate::peeringdb::*;
+    use tokio::task::spawn_blocking;
 
-    #[test]
-    fn test_json_remote() {
-        let data = load_pdb_json_from_repo(7);
-        println!("{:?}", data);
+    #[ignore]
+    #[tokio::test]
+    async fn test_json_remote() {
+        let data = loading_pdb_json_from_repo(1686787200).await;
+        println!("{:#?}", data);
     }
 }
