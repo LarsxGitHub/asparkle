@@ -27,15 +27,19 @@ fn bgpkit_get_ribs_size_ordered(ts: i64) -> Vec<BrokerItem> {
         .collect()
 }
 
-fn run_consumer(ch_in: Receiver<AspaValidatedRoute>) -> HashMap<u32, HashMap<u32, LatestDetails>> {
+fn run_consumer(
+    ch_in: Receiver<(String, AspaValidatedRoute)>,
+) -> HashMap<u32, HashMap<u32, LatestDetails>> {
     let mut witness_map: HashMap<u32, HashMap<u32, LatestDetails>> = HashMap::new();
 
     let mut count = 0;
     loop {
         // pull in validated route, break once we hit the end of out recv()
         let mut val_route: AspaValidatedRoute;
+        let mut collector: String;
         if let Ok(tmp) = ch_in.recv() {
-            val_route = tmp;
+            collector = tmp.0;
+            val_route = tmp.1;
         } else {
             break;
         }
@@ -75,6 +79,7 @@ fn run_consumer(ch_in: Receiver<AspaValidatedRoute>) -> HashMap<u32, HashMap<u32
                         cas: cas,
                         pas: pas,
                         witness_type: witness_type,
+                        example_route_collector: collector.to_string(),
                         example_route_pfx: val_route.pfx.to_string(),
                         example_route_path: val_route
                             .path
@@ -99,6 +104,7 @@ fn get_unseen_details(cas: &u32, pas: &u32, file: &String) -> LatestDetails {
         cas: *cas,
         pas: *pas,
         witness_type: JsonWitnessType::UNSEEN,
+        example_route_collector: "".to_string(),
         example_route_pfx: "".to_string(),
         example_route_path: "".to_string(),
         example_route_apex: 0,
@@ -205,10 +211,14 @@ pub(crate) fn run_pipeline(
                 // validate the route and send successful messages to consumer
                 match aspa_val_cl.validate_opportunistically(&elem) {
                     OpportunisticAspaValidationState::InvalidAspa(val_route)
-                    | OpportunisticAspaValidationState::Valid(val_route) => {
-                        ch_out_cl.send(val_route).unwrap()
-                    }
+                    | OpportunisticAspaValidationState::Valid(val_route) => ch_out_cl
+                        .send((target.collector_id.to_string(), val_route))
+                        .unwrap(),
                     _ => {} // no opportunities, just ignore this route.
+                }
+
+                if i == 100 {
+                    break;
                 }
             }
         });
@@ -225,6 +235,8 @@ pub(crate) fn run_pipeline(
     let aspa_summary = AspaSummary::from(&latest_details_rows);
     let meta_data = MetaData {
         timestamp: rib_ts as u32,
+        routerservers_v4: router_servers_ipv4.into_iter().collect(),
+        routerservers_v6: router_servers_ipv6.into_iter().collect(),
     };
     let json_container = JsonContainer {
         latest_details: latest_details_rows,

@@ -48,6 +48,7 @@ pub(crate) enum RampDirection {
 pub(crate) struct AspaValidatedRoute {
     pub pfx: ipnet::IpNet,
     pub path: Vec<u32>,
+
     pub apex: u32,
     pub apex_reason: UpInfSuccessReason,
     pub witnesses: Vec<AspaAttestWitness>,

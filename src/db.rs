@@ -25,6 +25,8 @@ pub(crate) struct JsonContainer {
 #[derive(Deserialize, Serialize, Debug)]
 pub(crate) struct MetaData {
     pub(crate) timestamp: u32,
+    pub(crate) routerservers_v4: Vec<u32>,
+    pub(crate) routerservers_v6: Vec<u32>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -33,6 +35,7 @@ pub(crate) struct LatestDetails {
     pub cas: u32,
     pub pas: u32,
     pub witness_type: JsonWitnessType,
+    pub example_route_collector: String,
     pub example_route_pfx: String,
     pub example_route_path: String,
     pub example_route_apex: u32,
