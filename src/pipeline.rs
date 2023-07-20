@@ -70,6 +70,10 @@ fn run_consumer(
                 witness_map.insert(cas, HashMap::new());
             }
 
+            if witness_type == JsonWitnessType::OFFENDED {
+                println!("offended record, cas: {} pas: {}", cas, pas);
+            }
+
             // if this (cas,pas)-pair has no example route yet, add one.
             if !witness_map.get_mut(&cas).unwrap().contains_key(&pas) {
                 witness_map.get_mut(&cas).unwrap().insert(
@@ -231,9 +235,6 @@ pub(crate) fn run_pipeline(
                 if i == 100 {
                     meta_out_cl.send(target.collector_id.to_string()).unwrap();
                     // if this is only a dry_run, break after 100 elements
-                    if dry_run {
-                        break;
-                    }
                 }
             }
         });
