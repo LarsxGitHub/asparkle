@@ -101,15 +101,15 @@ pub(crate) enum UpstreamExtractionResult {
 /// Please note, ASPA became AFI-agnostic in latest draft.
 pub(crate) fn lookup_from_attests(
     attestations: &Vec<(AsProviderAttestation, String)>,
-) -> HashMap<u32, HashSet<(u32, &String)>> {
-    let mut lookup: HashMap<u32, HashSet<(u32, &String)>> = HashMap::new();
+) -> HashMap<u32, HashMap<u32, HashSet<&String>>> {
+    let mut lookup: HashMap<u32, HashMap<u32, HashSet<&String>>> = HashMap::new();
 
     // parse attestations
     for (attest, file) in attestations.into_iter() {
         let customer = attest.customer_as().into_u32();
         for provider_as_set in attest.provider_as_set().iter() {
             let provider: u32 = provider_as_set.provider().into_u32();
-            utils::add_to_hashmap_set(&mut lookup, &customer, &(provider, file));
+            utils::add_to_double_nested_hashset(&mut lookup, &customer, &provider, &file);
         }
     }
 

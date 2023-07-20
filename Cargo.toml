@@ -9,7 +9,7 @@ edition = "2021"
 bgpkit-parser = "0.9.4"
 bgpkit-broker = "0.6.1"
 chrono = "0.4.24"
-clap = "4.3.0"
+clap = "4.3.17"
 log = "0.4.17"
 rpki = {version="0.16.1", features = ["repository", "crypto"]}
 stats-cli = "3.0.1"

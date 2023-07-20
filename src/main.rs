@@ -257,6 +257,10 @@ fn parse_dir(cli_args: &ArgMatches, dir_key: &str, extension: Option<&str>) -> S
     ))
 }
 
+fn flag_is_set(cli_args: &ArgMatches, key: &str) -> bool {
+    cli_args.contains_id(key)
+}
+
 /// Gets CLI parameters passed to the binary
 fn get_cli_parameters() -> ArgMatches {
     Command::new("asparkle")
@@ -296,6 +300,13 @@ fn get_cli_parameters() -> ArgMatches {
                     .required(true)
                     .value_parser(clap::builder::NonEmptyStringValueParser::new())
                     .help("the path to a directory in which you want to dump the resulting json file."),
+            )
+            .arg(
+                Arg::new("dry_run")
+                    .long("dry-run")
+                    .required(false)
+                    .action(clap::ArgAction::Set)
+                    .help("if this flag is set, asparkle performs a dry-run with only 100 elements per collector."),
             )
             .arg(
                 Arg::new("config")
@@ -554,7 +565,16 @@ fn infer_routine(cli_params: &ArgMatches) {
     let pdb_file = parse_file_with_ext(&cli_params, "pdb_dump", ".json");
     let json_out_fn = get_json_output_filename(&cli_params);
 
-    pipeline::run_pipeline(start_ts, &aspa_dir, &pdb_file, &json_out_fn, &config);
+    let dry_run = flag_is_set(&cli_params, "dry_run");
+
+    pipeline::run_pipeline(
+        start_ts,
+        &aspa_dir,
+        &pdb_file,
+        &json_out_fn,
+        &config,
+        dry_run,
+    );
 }
 
 fn collect_routine(cli_params: &ArgMatches) {

@@ -75,7 +75,7 @@ fn run_consumer(
                 witness_map.get_mut(&cas).unwrap().insert(
                     pas,
                     LatestDetails {
-                        attestation_file: "".to_string(),
+                        attestation_files: Vec::new(),
                         cas: cas,
                         pas: pas,
                         witness_type: witness_type,
@@ -104,9 +104,9 @@ fn run_consumer(
     (witness_map, seen_collectors)
 }
 
-fn get_unseen_details(cas: &u32, pas: &u32, file: &String) -> LatestDetails {
+fn get_unseen_details(cas: &u32, pas: &u32, files: &HashSet<&String>) -> LatestDetails {
     LatestDetails {
-        attestation_file: String::from(file),
+        attestation_files: files.into_iter().map(|x| String::from(*x)).collect(),
         cas: *cas,
         pas: *pas,
         witness_type: JsonWitnessType::UNSEEN,
@@ -120,33 +120,33 @@ fn get_unseen_details(cas: &u32, pas: &u32, file: &String) -> LatestDetails {
 }
 
 pub(crate) fn consolidate_results(
-    attest_lookup: &HashMap<u32, HashSet<(u32, &String)>>,
+    attest_lookup: &HashMap<u32, HashMap<u32, HashSet<&String>>>,
     witness_map: &HashMap<u32, HashMap<u32, LatestDetails>>,
 ) -> Vec<LatestDetails> {
     let mut rows: Vec<LatestDetails> = Vec::new();
-    for (cas, provider_set) in attest_lookup.into_iter() {
+    for (cas, provider_set) in attest_lookup.iter() {
         // check from known attestations into witnesses -> matches only UNSEEN or CONFIRMED
-        for (pas, file) in provider_set.into_iter() {
+        for (pas, files) in provider_set.iter() {
             if witness_map.contains_key(cas) {
                 // we have had witnesses for at least some providers, unwrap is safe.
                 if witness_map.get(cas).unwrap().contains_key(pas) {
                     // we also had a witness for this
                     let mut details = witness_map.get(cas).unwrap().get(pas).unwrap().clone();
-                    details.attestation_file = String::from(*file);
+                    details
+                        .attestation_files
+                        .extend(files.into_iter().map(|&x| String::from(x)));
                     rows.push(details);
                 } else {
-                    let details = get_unseen_details(cas, pas, file);
+                    let details = get_unseen_details(cas, pas, files);
                     rows.push(details);
                 }
             } else {
                 // not even customer_as was seen ...
-                let details = get_unseen_details(cas, pas, file);
+                let details = get_unseen_details(cas, pas, files);
                 rows.push(details);
             }
         }
         // check for ASNs in witnesses but not attestations -> matches only Offenses.
-        let spas_only: HashSet<u32> =
-            HashSet::from_iter(provider_set.into_iter().map(|pair| pair.0).into_iter());
 
         if !witness_map.contains_key(cas) {
             continue;
@@ -154,9 +154,11 @@ pub(crate) fn consolidate_results(
 
         for (pas, details) in witness_map.get(cas).unwrap().iter() {
             // if this pas is not in original spas, then it's an offense.
-            if !spas_only.contains(pas) {
+            if let Some(attests) = provider_set.get(pas) {
                 let mut details = details.clone();
-                details.attestation_file = "None".to_string();
+                details
+                    .attestation_files
+                    .extend(attests.into_iter().map(|&x| String::from(x)));
                 rows.push(details);
             }
         }
@@ -170,6 +172,7 @@ pub(crate) fn run_pipeline(
     pdb_file_path: &str,
     json_out_fn: &str,
     config: &Config,
+    dry_run: bool,
 ) {
     // load route servers from PeeringDB file.
     let mut router_servers_ipv4: HashSet<u32> = HashSet::new();
@@ -227,6 +230,10 @@ pub(crate) fn run_pipeline(
 
                 if i == 100 {
                     meta_out_cl.send(target.collector_id.to_string()).unwrap();
+                    // if this is only a dry_run, break after 100 elements
+                    if dry_run {
+                        break;
+                    }
                 }
             }
         });

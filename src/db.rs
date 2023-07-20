@@ -32,7 +32,7 @@ pub(crate) struct MetaData {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub(crate) struct LatestDetails {
-    pub attestation_file: String,
+    pub attestation_files: Vec<String>,
     pub cas: u32,
     pub pas: u32,
     pub witness_type: JsonWitnessType,
@@ -60,7 +60,9 @@ impl From<&Vec<LatestDetails>> for AspaSummary {
         // get cnt_asa_files_total
         let mut asa_files: HashSet<&str> = HashSet::new();
         for row in rows {
-            asa_files.insert(&row.attestation_file);
+            for file in &row.attestation_files {
+                asa_files.insert(file);
+            }
         }
         let cnt_asa_files_total = asa_files.len() as u32;
         drop(asa_files);
