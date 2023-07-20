@@ -70,10 +70,6 @@ fn run_consumer(
                 witness_map.insert(cas, HashMap::new());
             }
 
-            if witness_type == JsonWitnessType::OFFENDED {
-                println!("offended record, cas: {} pas: {}", cas, pas);
-            }
-
             // if this (cas,pas)-pair has no example route yet, add one.
             if !witness_map.get_mut(&cas).unwrap().contains_key(&pas) {
                 witness_map.get_mut(&cas).unwrap().insert(
@@ -82,6 +78,7 @@ fn run_consumer(
                         attestation_files: Vec::new(),
                         cas: cas,
                         pas: pas,
+                        witness_type: witness_type,
                         witness_type: witness_type,
                         example_route_collector: collector.to_string(),
                         example_route_pfx: val_route.pfx.to_string(),
