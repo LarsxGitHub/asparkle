@@ -156,15 +156,24 @@ pub(crate) fn consolidate_results(
             continue;
         }
 
-        for (pas, details) in witness_map.get(cas).unwrap().iter() {
-            // if this pas is not in original spas, then it's an offense.
-            if let Some(attests) = provider_set.get(pas) {
-                let mut details = details.clone();
-                details
-                    .attestation_files
-                    .extend(attests.into_iter().map(|&x| String::from(x)));
-                rows.push(details);
+        let mut offended_attest_files: HashSet<&String> = HashSet::new();
+        for (_, details) in witness_map.get(cas).unwrap().iter() {
+            for attest in details.attestation_files.iter() {
+                offended_attest_files.insert(attest);
             }
+        }
+
+        for (pas, details) in witness_map.get(cas).unwrap().iter() {
+            // only if this pas is not in original spas, then it's an offense.
+            if provider_set.contains_key(pas) {
+                continue;
+            }
+
+            let mut details_cl = details.clone();
+            details_cl
+                .attestation_files
+                .extend(offended_attest_files.iter().map(|&x| String::from(x)));
+            rows.push(details_cl);
         }
     }
     rows
