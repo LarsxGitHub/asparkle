@@ -79,7 +79,6 @@ fn run_consumer(
                         cas: cas,
                         pas: pas,
                         witness_type: witness_type,
-                        witness_type: witness_type,
                         example_route_collector: collector.to_string(),
                         example_route_pfx: val_route.pfx.to_string(),
                         example_route_path: val_route
