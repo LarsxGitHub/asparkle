@@ -303,7 +303,7 @@ fn get_cli_parameters() -> ArgMatches {
             )
             .arg(
                 Arg::new("dry_run")
-                    .long("dry-run")
+                    .long("dry_run")
                     .required(false)
                     .action(clap::ArgAction::Set)
                     .help("if this flag is set, asparkle performs a dry-run with only 100 elements per collector."),
