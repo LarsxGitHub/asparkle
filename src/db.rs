@@ -39,7 +39,7 @@ pub(crate) struct LatestDetails {
     pub example_route_collector: String,
     pub example_route_pfx: String,
     pub example_route_path: String,
-    pub example_route_apex: u32,
+    pub example_route_apex: Vec<u32>,
     pub example_route_apex_reason: aspa::UpInfSuccessReason,
     pub example_route_ramp_direction: aspa::RampDirection,
 }

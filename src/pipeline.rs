@@ -87,7 +87,7 @@ fn run_consumer(
                             .into_iter()
                             .map(|i| i.to_string())
                             .join(" "),
-                        example_route_apex: val_route.apex,
+                        example_route_apex: val_route.apex.clone(),
                         example_route_apex_reason: val_route.apex_reason,
                         example_route_ramp_direction: direction,
                     },
@@ -113,7 +113,7 @@ fn get_unseen_details(cas: &u32, pas: &u32, files: &HashSet<&String>) -> LatestD
         example_route_collector: "".to_string(),
         example_route_pfx: "".to_string(),
         example_route_path: "".to_string(),
-        example_route_apex: 0,
+        example_route_apex: vec![],
         example_route_apex_reason: UpInfSuccessReason::SuccessAttestation,
         example_route_ramp_direction: RampDirection::Up,
     }
