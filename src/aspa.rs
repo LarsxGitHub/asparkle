@@ -75,7 +75,6 @@ pub(crate) enum OpportunisticAspaValidationState {
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone, Copy)]
 pub(crate) enum UpInfSuccessReason {
     SuccessTierone,        // Successful inference based on a Tier 1 ASN.
-    SuccessTieronePeer,    // Successful inference based on the next hop of a Tier 1 ASN.
     SuccessRcpTierone, // Successful inference based the Route collector peer being a Tier 1 ASN.
     SuccessAttestation, // Successful inference based on an ASPA attestation.
     SuccessRouteserver, // Successful inference based on a route server.
@@ -234,6 +233,10 @@ impl OpportunisticAspaPathValidator {
                 }
             }
         }
+    }
+
+    pub(crate) fn get_upstreams(&self) -> HashMap<u32, HashSet<u32>> {
+        self.upstreams_ipv4.clone()
     }
 
     /// Adds sets of route server ASNs for the validation.
@@ -458,38 +461,22 @@ impl OpportunisticAspaPathValidator {
             None => vec![],
         };
 
-        println!(
-            "{:?}, {:?}, {:?}, {:?}, {:?}, {:?}",
-            max_upstream_idx,
-            upstream_top_aspa,
-            upstream,
-            max_downstream_idx,
-            downstream_top_aspa,
-            downstream
-        );
         // check if apex is available
         let mut apex: Vec<u32> = vec![];
-        println!("apex: {:?}", apex);
         if max_upstream_idx == max_downstream_idx {
-            println!("case 1");
             // overlap in one ASN
             apex.push(*path_dense.get(max_upstream_idx).unwrap());
         } else if max_downstream_idx == path_dense.len() - 1 {
-            println!("case 2");
-
             // the whole path is an downstream
             let asn = *path_dense.get(path_dense.len() - 1).unwrap();
             apex.push(asn);
             upstream.push(asn);
         } else if max_upstream_idx == 0 {
-            // the whole path is a downstream
-            println!("case 3");
             // the whole path is an upstream
             let asn = *path_dense.get(0).unwrap();
             apex.push(asn);
             downstream.push(asn);
         }
-        println!("apex: {:?}", apex);
         let mut reason;
         if otc_used {
             if (downstream_top_aspa.is_none() & upstream_top_aspa.is_none()) {

@@ -147,16 +147,13 @@ pub(crate) fn consolidate_results(
             }
         }
         // check for ASNs in witnesses but not attestations -> matches only Offenses.
-
         if !witness_map.contains_key(cas) {
             continue;
         }
 
         let mut offended_attest_files: HashSet<&String> = HashSet::new();
-        for (_, details) in witness_map.get(cas).unwrap().iter() {
-            for attest in details.attestation_files.iter() {
-                offended_attest_files.insert(attest);
-            }
+        for (_, attests) in provider_set.iter() {
+            offended_attest_files.extend(attests);
         }
 
         for (pas, details) in witness_map.get(cas).unwrap().iter() {
@@ -237,8 +234,9 @@ pub(crate) fn run_pipeline(
                     _ => {} // no opportunities, just ignore this route.
                 }
 
-                if i == 100 {
+                if i == 1_000_000 {
                     meta_out_cl.send(target.collector_id.to_string()).unwrap();
+                    break;
                     // if this is only a dry_run, break after 100 elements
                 }
             }
@@ -259,6 +257,7 @@ pub(crate) fn run_pipeline(
         timestamp: rib_ts as u32,
         routerservers_v4: router_servers_ipv4.into_iter().sorted().collect(),
         routerservers_v6: router_servers_ipv6.into_iter().sorted().collect(),
+        upstreams: aspa_val.get_upstreams(),
         seen_collectors: collectors.into_iter().sorted().collect(),
     };
     let json_container = JsonContainer {
